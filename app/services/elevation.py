@@ -54,7 +54,8 @@ async def _fetch_elevations_batch(
     }
 
     response = await request_with_retry(
-        "POST", url, json=body, retries=2, backoff=0.3
+        "POST", url, json=body, retries=2, backoff=0.3,
+        service_name="open_elevation",
     )
     response.raise_for_status()
     data = response.json()

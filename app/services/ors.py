@@ -232,7 +232,9 @@ async def get_route(origin: Coordinate, destination: Coordinate) -> RouteResult:
         "geometry": True,
     }
 
-    response = await request_with_retry("POST", url, headers=headers, json=body)
+    response = await request_with_retry(
+        "POST", url, headers=headers, json=body, service_name="ors",
+    )
     response.raise_for_status()
     data = response.json()
 
@@ -298,7 +300,9 @@ async def get_routes(
         },
     }
 
-    response = await request_with_retry("POST", url, headers=headers, json=body)
+    response = await request_with_retry(
+        "POST", url, headers=headers, json=body, service_name="ors",
+    )
     response.raise_for_status()
     data = response.json()
 

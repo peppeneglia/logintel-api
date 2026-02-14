@@ -24,6 +24,12 @@ class Settings(BaseSettings):
     enable_special_elements: bool = True
     cache_ttl_osm: int = 604800  # 7 days
     overpass_base_url: str = "https://overpass-api.de"
+    cb_failure_threshold: int = 5
+    cb_recovery_timeout: int = 30
+    alert_error_rate_pct: float = 10.0
+    alert_latency_p95_ms: float = 3000.0
+    alert_cache_rate_pct: float = 30.0
+    alert_cb_open_seconds: int = 300
 
 
 @lru_cache()

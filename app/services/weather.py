@@ -166,7 +166,9 @@ async def _fetch_single_point_weather(
         f"&timezone=auto"
     )
 
-    response = await request_with_retry("GET", url, retries=2, backoff=0.3)
+    response = await request_with_retry(
+        "GET", url, retries=2, backoff=0.3, service_name="open_meteo",
+    )
     response.raise_for_status()
     data = response.json()
 

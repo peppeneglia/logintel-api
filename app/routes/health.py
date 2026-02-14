@@ -8,6 +8,8 @@ import logging
 
 from fastapi import APIRouter
 
+from app.alerting import alert_manager
+from app.circuit_breaker import CircuitBreakerState, service_breakers
 from app.config import get_settings
 from app.metrics import metrics_collector
 from app.services.cache import get_redis
@@ -35,9 +37,22 @@ async def health_check():
 
     redis_status = await _check_redis()
 
-    overall = "healthy" if redis_status["status"] == "healthy" else "degraded"
+    # Circuit breaker statuses
+    cb_statuses = service_breakers.all_statuses()
+    any_cb_open = any(
+        s["state"] == CircuitBreakerState.OPEN.value for s in cb_statuses.values()
+    )
+
+    overall = (
+        "degraded"
+        if redis_status["status"] != "healthy" or any_cb_open
+        else "healthy"
+    )
 
     snap = metrics_collector.snapshot()
+
+    # Active alerts
+    alerts = alert_manager.check_alerts()
 
     return {
         "status": overall,
@@ -45,6 +60,7 @@ async def health_check():
         "environment": settings.app_env,
         "dependencies": {
             "redis": redis_status,
+            **{f"cb:{name}": st for name, st in cb_statuses.items()},
         },
         "metrics": {
             "uptime_seconds": snap.uptime_seconds,
@@ -53,4 +69,12 @@ async def health_check():
             "latency_p95_ms": snap.latency_p95_ms,
             "cache_hit_rate_pct": snap.cache_hit_rate_pct,
         },
+        "alerts": [
+            {
+                "level": a.level.value,
+                "rule": a.rule,
+                "message": a.message,
+            }
+            for a in alerts
+        ],
     }

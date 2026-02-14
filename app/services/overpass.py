@@ -161,7 +161,8 @@ async def get_special_elements(
 
     try:
         response = await request_with_retry(
-            "POST", url, data={"data": query}, retries=2, backoff=0.5
+            "POST", url, data={"data": query}, retries=2, backoff=0.5,
+            service_name="overpass",
         )
         response.raise_for_status()
         data = response.json()

@@ -44,4 +44,6 @@ class TimingMiddleware(BaseHTTPMiddleware):
             status_code=response.status_code,
             duration_ms=duration_ms,
         )
+        from app.alerting import alert_manager
+        alert_manager.maybe_check()
         return response

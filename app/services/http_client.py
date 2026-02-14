@@ -55,6 +55,7 @@ async def request_with_retry(
     *,
     retries: int = MAX_RETRIES,
     backoff: float = BASE_BACKOFF_SECONDS,
+    service_name: str | None = None,
     **kwargs: Any,
 ) -> httpx.Response:
     """
@@ -62,7 +63,26 @@ async def request_with_retry(
 
     Retries on 5xx responses and connection/timeout errors.
     Raises the last encountered exception after all retries are exhausted.
+
+    When *service_name* is given the request is gated by the corresponding
+    circuit breaker — if the breaker is OPEN the call fails fast with
+    ``ServiceUnavailableError``.
     """
+    # --- Circuit breaker check ---
+    breaker = None
+    if service_name is not None:
+        from app.circuit_breaker import service_breakers
+        from app.errors import ServiceUnavailableError
+
+        breaker = service_breakers.get(service_name)
+        if not breaker.allow_request():
+            logger.warning(
+                "Circuit breaker OPEN for %s — fail-fast", service_name,
+            )
+            raise ServiceUnavailableError(
+                f"Service '{service_name}' circuit breaker is OPEN"
+            )
+
     client = get_client()
     last_exc: Exception | None = None
 
@@ -70,6 +90,8 @@ async def request_with_retry(
         try:
             response = await client.request(method, url, **kwargs)
             if response.status_code < 500:
+                if breaker is not None:
+                    breaker.record_success()
                 return response
             # 5xx — worth retrying
             last_exc = httpx.HTTPStatusError(
@@ -92,6 +114,8 @@ async def request_with_retry(
             wait = backoff * (2 ** (attempt - 1))
             await asyncio.sleep(wait)
 
-    # All retries exhausted
+    # All retries exhausted — record failure on breaker
+    if breaker is not None:
+        breaker.record_failure()
     logger.error("HTTP %s %s failed after %d attempts", method, url, retries)
     raise last_exc  # type: ignore[misc]

@@ -709,3 +709,115 @@ tests/
   test_monitoring.py   ← NUOVO: 18 test
   test_special_elements.py ← NUOVO: 22 test
 ```
+
+---
+
+## Blocco 8: Circuit Breaker + Alerting (2026-02-14)
+
+### Obiettivo
+Proteggere il sistema da servizi esterni down con circuit breaker (FRD 4.5) e monitorare soglie operative con alerting strutturato (FRD 9.2).
+
+**Problema risolto:** ORS down per 10 min → prima ogni prediction sprecava ~4.5s in retry. Ora, dopo 5 fallimenti consecutivi, il sistema fa fail-fast in <1ms.
+
+### Cosa è stato implementato
+
+#### 1. Circuit Breaker (`app/circuit_breaker.py`)
+- **`CircuitBreakerState`** enum: CLOSED, OPEN, HALF_OPEN
+- **`CircuitBreaker`** class (per-service, thread-safe con `threading.Lock`):
+  - `allow_request()` — CLOSED→True, OPEN→check timeout→HALF_OPEN, HALF_OPEN→True (probe)
+  - `record_success()` — reset contatore, HALF_OPEN→CLOSED
+  - `record_failure()` — incrementa contatore, CLOSED→OPEN dopo threshold, HALF_OPEN→OPEN
+  - `status()` → dict con name, state, consecutive_failures, last_failure_time, time_in_state_seconds
+- **`ServiceBreakers`** registry (singleton):
+  - `get(service_name)` — lazy creation con config da settings
+  - `all_statuses()` — snapshot di tutti i breaker registrati
+- Config: `cb_failure_threshold=5`, `cb_recovery_timeout=30`
+
+#### 2. Alerting (`app/alerting.py`)
+- **`AlertLevel`** enum: CRITICAL, WARNING
+- **`Alert`** dataclass: level, rule, message, value, threshold
+- **`AlertManager`** class:
+  - Soglie da FRD 9.2:
+    - CRITICAL: error_rate > 10%, circuit breaker OPEN > 5 min
+    - WARNING: latency p95 > 3000ms, cache hit rate < 30%
+  - `check_alerts()` — valuta tutte le soglie con cooldown (critical=300s, warning=900s)
+  - `maybe_check()` — throttle: esegue max ogni 30s
+  - Output: log strutturato a ERROR/WARNING con `extra={"alert": True}`
+
+#### 3. Integrazione HTTP client (`app/services/http_client.py`)
+- `request_with_retry()` — nuovo parametro `service_name: str | None`
+- Prima del retry loop: check `breaker.allow_request()` → se OPEN, raise `ServiceUnavailableError`
+- Su successo: `breaker.record_success()`, su esaurimento retry: `breaker.record_failure()`
+- Import inline per evitare circular imports
+
+#### 4. Service modules aggiornati
+- `app/services/ors.py` — `service_name="ors"` (2 chiamate: get_route, get_routes)
+- `app/services/weather.py` — `service_name="open_meteo"`
+- `app/services/elevation.py` — `service_name="open_elevation"`
+- `app/services/overpass.py` — `service_name="overpass"`
+
+#### 5. Middleware (`app/middleware.py`)
+- `TimingMiddleware.dispatch()` chiama `alert_manager.maybe_check()` dopo ogni richiesta
+
+#### 6. Health endpoint (`app/routes/health.py`)
+- Circuit breaker status per ogni servizio in `dependencies` (chiave `cb:<nome>`)
+- Lista `alerts` con alert attivi
+- Status `"degraded"` se Redis unhealthy OPPURE qualsiasi CB OPEN
+
+### Test
+206 test totali, tutti passano (+25 nuovi):
+- `test_circuit_breaker.py` (15):
+  - `TestCircuitBreaker` (9): stato iniziale, allow/deny, transizioni CLOSED→OPEN→HALF_OPEN→CLOSED/OPEN, status dict
+  - `TestServiceBreakers` (3): lazy creation, same breaker per same name, all_statuses
+  - `TestHttpClientWithCircuitBreaker` (3): request passa CB closed, fail-fast CB open, nessun CB senza service_name
+- `test_alerting.py` (10):
+  - No alert con metriche ok, critical su error rate >10%, critical su CB OPEN >5min
+  - Warning su latency p95 >3000ms, warning su cache hit <30%
+  - Cooldown impedisce duplicati, cooldown scade → alert riparte
+  - Multipli alert simultanei, maybe_check throttle 30s, log con level corretto
+
+### Decisioni tecniche
+| Decisione | Motivazione |
+|---|---|
+| CB per-service (non globale) | ORS down non deve bloccare Open-Meteo |
+| Lazy creation breakers | Breaker creato al primo uso, non serve registrazione esplicita |
+| Import inline in http_client | Evita circular import `http_client ↔ circuit_breaker ↔ config` |
+| Cooldown per alert rule | Ogni regola ha il suo cooldown — un alert non blocca gli altri |
+| `maybe_check()` throttle 30s | Evita overhead di valutazione soglie su ogni singola richiesta |
+| Alert in log (non webhook) | Zero costo; per webhook servirebbe un servizio esterno |
+| `service_name` opzionale | Backward compatible — chiamate senza service_name non toccano il CB |
+
+### Flusso Circuit Breaker
+```
+Richiesta → allow_request()?
+  │
+  ├─ CLOSED → True → retry loop → successo → record_success()
+  │                              → tutti retry falliti → record_failure()
+  │                                                      → ≥5 failures → OPEN
+  │
+  ├─ OPEN → timeout scaduto? → Sì → HALF_OPEN → True (probe)
+  │                           → No → False → ServiceUnavailableError (fail-fast)
+  │
+  └─ HALF_OPEN → True (probe) → successo → CLOSED
+                               → fallimento → OPEN
+```
+
+### Struttura file aggiornata
+```
+app/
+  circuit_breaker.py   ← NUOVO: CircuitBreaker + ServiceBreakers
+  alerting.py          ← NUOVO: AlertManager + Alert + AlertLevel
+  config.py            ← + cb_failure_threshold, cb_recovery_timeout, alert thresholds
+  middleware.py        ← + alert_manager.maybe_check()
+  routes/
+    health.py          ← + CB statuses, alerts list, degraded on CB OPEN
+  services/
+    http_client.py     ← + service_name param, CB integration
+    ors.py             ← + service_name="ors"
+    weather.py         ← + service_name="open_meteo"
+    elevation.py       ← + service_name="open_elevation"
+    overpass.py        ← + service_name="overpass"
+tests/
+  test_circuit_breaker.py ← NUOVO: 15 test
+  test_alerting.py        ← NUOVO: 10 test
+```
