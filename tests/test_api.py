@@ -1,11 +1,78 @@
 """Tests for the API endpoints."""
 
+from __future__ import annotations
+
+from datetime import datetime, timezone
+from unittest.mock import AsyncMock, patch
+
 import pytest
 from fastapi.testclient import TestClient
 
 from app.main import app
+from app.models.schemas import (
+    ConfidenceComponents,
+    ConfidenceLevel,
+    ConfidenceScore,
+    Coordinate,
+    PredictionResponse,
+    RoadType,
+    SegmentDetail,
+    SegmentFactors,
+)
 
 client = TestClient(app)
+
+
+def _make_stub_prediction(
+    origin: Coordinate | None = None,
+    destination: Coordinate | None = None,
+    departure_time: datetime | None = None,
+) -> PredictionResponse:
+    """Create a fake PredictionResponse for mocking build_prediction."""
+    if origin is None:
+        origin = Coordinate(lat=45.464, lon=9.190)
+    if destination is None:
+        destination = Coordinate(lat=41.902, lon=12.496)
+    if departure_time is None:
+        departure_time = datetime(2026, 2, 15, 8, 0, tzinfo=timezone.utc)
+
+    segment = SegmentDetail(
+        index=0,
+        start_point=origin,
+        end_point=destination,
+        length_km=477.0,
+        estimated_arrival=departure_time,
+        weather=[],
+        factors=SegmentFactors(
+            road_type=RoadType.HIGHWAY,
+            road_factor=0.8,
+            altitude_m=200.0,
+            altitude_factor=1.0,
+            time_factor=1.0,
+            calibration_factor=1.0,
+        ),
+        delay_minutes=0.0,
+    )
+
+    confidence = ConfidenceScore(
+        overall=85.0,
+        level=ConfidenceLevel.HIGH,
+        components=ConfidenceComponents(
+            time_horizon=95.0,
+            weather_stability=90.0,
+            historical_accuracy=70.0,
+            data_completeness=100.0,
+        ),
+    )
+
+    return PredictionResponse(
+        origin=origin,
+        destination=destination,
+        departure_time=departure_time,
+        total_delay_minutes=0.0,
+        confidence=confidence,
+        segments=[segment],
+    )
 
 
 class TestHealthEndpoint:
@@ -24,7 +91,12 @@ class TestPredictionEndpoints:
             "destination": {"lat": 41.902, "lon": 12.496},
             "departure_time": "2026-02-15T08:00:00+01:00",
         }
-        return client.post("/v1/predictions", json=payload)
+        with patch(
+            "app.routes.predictions.build_prediction",
+            new_callable=AsyncMock,
+            return_value=_make_stub_prediction(),
+        ):
+            return client.post("/v1/predictions", json=payload)
 
     def test_create_prediction(self):
         resp = self._create_prediction()

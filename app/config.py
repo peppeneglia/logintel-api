@@ -12,6 +12,9 @@ class Settings(BaseSettings):
     supabase_anon_key: str = ""
     supabase_service_key: str = ""
     upstash_redis_url: str = ""
+    ors_base_url: str = "https://api.openrouteservice.org"
+    open_meteo_base_url: str = "https://api.open-meteo.com"
+    open_elevation_base_url: str = "https://api.open-elevation.com"
     sampling_interval_km: int = 50
     max_forecast_hours: int = 72
     cache_ttl_route: int = 86400
