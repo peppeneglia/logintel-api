@@ -2,9 +2,11 @@ from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
 
+from app.config import get_settings
 from app.errors import register_error_handlers
 from app.routes.health import router as health_router
 from app.routes.predictions import router as predictions_router
+from app.services.cache import close_redis, init_redis
 from app.services.http_client import close_client, init_client
 
 
@@ -12,7 +14,10 @@ from app.services.http_client import close_client, init_client
 async def lifespan(application: FastAPI):
     """Manage startup/shutdown of shared resources."""
     init_client()
+    settings = get_settings()
+    init_redis(settings.upstash_redis_url)
     yield
+    await close_redis()
     await close_client()
 
 

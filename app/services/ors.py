@@ -16,6 +16,7 @@ from dataclasses import dataclass
 
 from app.config import get_settings
 from app.models.schemas import Coordinate, RoadType
+from app.services.cache import cache_get, cache_set
 from app.services.http_client import request_with_retry
 
 logger = logging.getLogger(__name__)
@@ -142,13 +143,48 @@ def get_road_type_at_fraction(
     return RoadType.HIGHWAY
 
 
+def _route_to_dict(r: RouteResult) -> dict:
+    """Serialise RouteResult to a JSON-safe dict for caching."""
+    return {
+        "polyline": [{"lat": c.lat, "lon": c.lon} for c in r.polyline],
+        "duration_s": r.duration_s,
+        "distance_m": r.distance_m,
+        "road_types": [
+            [s, e, rt.value] for s, e, rt in r.road_types
+        ],
+    }
+
+
+def _dict_to_route(d: dict) -> RouteResult:
+    """Deserialise a cached dict back into a RouteResult."""
+    return RouteResult(
+        polyline=[Coordinate(lat=p["lat"], lon=p["lon"]) for p in d["polyline"]],
+        duration_s=d["duration_s"],
+        distance_m=d["distance_m"],
+        road_types=[
+            (s, e, RoadType(rt)) for s, e, rt in d["road_types"]
+        ],
+    )
+
+
 async def get_route(origin: Coordinate, destination: Coordinate) -> RouteResult:
     """
     Call ORS directions API to get a route for heavy-goods vehicles.
 
     Returns decoded polyline, total duration, distance, and road types.
+    Cached for 24h keyed on rounded coordinates (~1km grid).
     """
     settings = get_settings()
+    route_hash = compute_route_hash(origin, destination)
+    cache_key = f"route:{route_hash}"
+
+    # --- Cache check ---
+    cached = await cache_get(cache_key)
+    if cached is not None:
+        logger.info("ORS route cache HIT (key=%s)", cache_key)
+        return _dict_to_route(cached)
+
+    # --- API call ---
     base_url = settings.ors_base_url.rstrip("/")
     url = f"{base_url}/v2/directions/driving-hgv"
 
@@ -186,9 +222,14 @@ async def get_route(origin: Coordinate, destination: Coordinate) -> RouteResult:
         distance_m / 1000, duration_s / 60, len(polyline),
     )
 
-    return RouteResult(
+    result = RouteResult(
         polyline=polyline,
         duration_s=duration_s,
         distance_m=distance_m,
         road_types=road_types,
     )
+
+    # --- Cache store ---
+    await cache_set(cache_key, _route_to_dict(result), ttl=settings.cache_ttl_route)
+
+    return result

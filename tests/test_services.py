@@ -1,4 +1,4 @@
-"""Tests for external service integrations (Block 2)."""
+"""Tests for external service integrations (Block 2 + Block 3 cache)."""
 
 from __future__ import annotations
 
@@ -11,6 +11,7 @@ import pytest
 import respx
 
 import app.services.http_client as _hc_mod
+import app.services.cache as _cache_mod
 from app.models.schemas import Coordinate, RoadType, WeatherType
 from app.services.http_client import (
     close_client,
@@ -20,6 +21,8 @@ from app.services.http_client import (
 )
 from app.services.ors import (
     RouteResult,
+    _dict_to_route,
+    _route_to_dict,
     compute_route_hash,
     decode_polyline,
     get_road_type_at_fraction,
@@ -28,6 +31,7 @@ from app.services.ors import (
 from app.services.weather import (
     _classify_point_weather,
     _find_hour_index,
+    _weather_cache_key,
     get_weather_at_points,
 )
 from app.services.elevation import (
@@ -45,6 +49,14 @@ def _manage_http_client():
     _hc_mod._client = httpx.AsyncClient(timeout=httpx.Timeout(5.0))
     yield
     _hc_mod._client = None
+
+
+@pytest.fixture(autouse=True)
+def _disable_redis():
+    """Disable Redis for all tests by default (cache passthrough)."""
+    _cache_mod._redis = None
+    yield
+    _cache_mod._redis = None
 
 
 # ─── HTTP Client Tests ──────────────────────────────────────────────────
@@ -399,3 +411,106 @@ class TestBuildPrediction:
             # Segments should use default elevation (200m)
             for seg in result.segments:
                 assert seg.factors.altitude_m == DEFAULT_ELEVATION_M
+
+
+# ─── Cache Integration Tests (Block 3) ────────────────────────────────
+
+class TestOrsCacheHit:
+    @pytest.mark.asyncio
+    async def test_get_route_returns_cached_result(self):
+        """When cache has the route, ORS API should NOT be called."""
+        import fakeredis.aioredis
+
+        fake = fakeredis.aioredis.FakeRedis(decode_responses=True)
+        _cache_mod._redis = fake
+
+        # Pre-populate cache with a route
+        origin = Coordinate(lat=45.464, lon=9.190)
+        dest = Coordinate(lat=41.902, lon=12.496)
+        route_hash = compute_route_hash(origin, dest)
+        cached_data = {
+            "polyline": [
+                {"lat": 45.464, "lon": 9.190},
+                {"lat": 43.0, "lon": 10.8},
+                {"lat": 41.902, "lon": 12.496},
+            ],
+            "duration_s": 18000.0,
+            "distance_m": 500000.0,
+            "road_types": [[0.0, 1.0, "highway"]],
+        }
+        await _cache_mod.cache_set(f"route:{route_hash}", cached_data, ttl=86400)
+
+        # Call get_route — should NOT hit ORS
+        with respx.mock:
+            ors_route = respx.post(
+                "https://api.openrouteservice.org/v2/directions/driving-hgv"
+            )
+            ors_route.mock(return_value=httpx.Response(500, text="should not be called"))
+
+            result = await get_route(origin, dest)
+
+            assert not ors_route.called
+            assert isinstance(result, RouteResult)
+            assert result.duration_s == 18000.0
+            assert result.distance_m == 500000.0
+            assert len(result.polyline) == 3
+            assert result.road_types[0][2] == RoadType.HIGHWAY
+
+        await fake.aclose()
+
+
+class TestWeatherCacheHit:
+    @pytest.mark.asyncio
+    async def test_weather_returns_cached_result(self):
+        """When cache has daily weather, Open-Meteo should NOT be called."""
+        import fakeredis.aioredis
+
+        fake = fakeredis.aioredis.FakeRedis(decode_responses=True)
+        _cache_mod._redis = fake
+
+        point = Coordinate(lat=45.0, lon=9.0)
+        arrival = datetime(2026, 2, 15, 8, 0, tzinfo=timezone.utc)
+        cache_key = _weather_cache_key(point.lat, point.lon, "2026-02-15")
+
+        # Pre-populate cache with a full daily response
+        cached_hourly = {
+            "time": ["2026-02-15T08:00"],
+            "precipitation": [5.0],
+            "snowfall": [0.0],
+            "wind_speed_10m": [20.0],
+            "visibility": [10000.0],
+        }
+        await _cache_mod.cache_set(cache_key, cached_hourly, ttl=3600)
+
+        with respx.mock:
+            meteo_route = respx.get("https://api.open-meteo.com/v1/forecast")
+            meteo_route.mock(return_value=httpx.Response(500, text="should not be called"))
+
+            result = await get_weather_at_points([point], [arrival])
+
+            assert not meteo_route.called
+            assert len(result) == 1
+            assert len(result[0]) == 1
+            assert result[0][0].type == WeatherType.RAIN
+
+        await fake.aclose()
+
+
+class TestRouteResultSerialization:
+    def test_roundtrip(self):
+        """RouteResult → dict → RouteResult preserves data."""
+        original = RouteResult(
+            polyline=[
+                Coordinate(lat=45.0, lon=9.0),
+                Coordinate(lat=44.0, lon=10.0),
+            ],
+            duration_s=3600.0,
+            distance_m=100000.0,
+            road_types=[(0.0, 0.5, RoadType.HIGHWAY), (0.5, 1.0, RoadType.STATE_ROAD)],
+        )
+        d = _route_to_dict(original)
+        restored = _dict_to_route(d)
+        assert restored.duration_s == original.duration_s
+        assert restored.distance_m == original.distance_m
+        assert len(restored.polyline) == len(original.polyline)
+        assert restored.road_types[1][2] == RoadType.STATE_ROAD

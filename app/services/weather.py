@@ -12,8 +12,10 @@ from __future__ import annotations
 import logging
 from datetime import datetime
 
+from app.config import get_settings
 from app.engine.heuristics import classify_weather
 from app.models.schemas import Coordinate, WeatherCondition, WeatherType
+from app.services.cache import cache_get, cache_set
 from app.services.http_client import request_with_retry
 
 logger = logging.getLogger(__name__)
@@ -99,13 +101,61 @@ async def get_weather_at_points(
     return results
 
 
+def _weather_cache_key(lat: float, lon: float, date_str: str) -> str:
+    """Build a cache key from coordinates rounded to 0.1° (~11km) grid + date."""
+    lat_r = round(lat, 1)
+    lon_r = round(lon, 1)
+    return f"weather:{lat_r}:{lon_r}:{date_str}"
+
+
+def _extract_hour_from_daily(
+    hourly: dict, arrival: datetime
+) -> list[WeatherCondition]:
+    """Extract and classify weather for a specific hour from a full daily response."""
+    times = hourly.get("time", [])
+    idx = _find_hour_index(times, arrival)
+
+    if idx is None:
+        logger.debug(
+            "No matching hour for %s in weather data", arrival.isoformat()
+        )
+        return []
+
+    precipitation = (hourly.get("precipitation") or [0.0])[idx]
+    snowfall = (hourly.get("snowfall") or [0.0])[idx]
+    wind_speed = (hourly.get("wind_speed_10m") or [0.0])[idx]
+    visibility = (hourly.get("visibility") or [10000.0])[idx]
+
+    return _classify_point_weather(
+        precipitation=precipitation or 0.0,
+        snowfall=snowfall or 0.0,
+        wind_speed=wind_speed or 0.0,
+        visibility=visibility or 10000.0,
+    )
+
+
 async def _fetch_single_point_weather(
     point: Coordinate,
     arrival: datetime,
     base_url: str,
 ) -> list[WeatherCondition]:
-    """Fetch and classify weather for one point at one time."""
+    """Fetch and classify weather for one point at one time.
+
+    Caches the full daily response (all 24 hours) keyed on rounded
+    coordinates + date.  On a cache hit the specific hour is extracted
+    without calling Open-Meteo again.
+    """
+    settings = get_settings()
     date_str = arrival.strftime("%Y-%m-%d")
+    cache_key = _weather_cache_key(point.lat, point.lon, date_str)
+
+    # --- Cache check ---
+    cached = await cache_get(cache_key)
+    if cached is not None:
+        logger.debug("Weather cache HIT (key=%s)", cache_key)
+        return _extract_hour_from_daily(cached, arrival)
+
+    # --- API call ---
     url = (
         f"{base_url}/v1/forecast"
         f"?latitude={point.lat}"
@@ -121,23 +171,8 @@ async def _fetch_single_point_weather(
     data = response.json()
 
     hourly = data.get("hourly", {})
-    times = hourly.get("time", [])
-    idx = _find_hour_index(times, arrival)
 
-    if idx is None:
-        logger.debug(
-            "No matching hour for %s in Open-Meteo response", arrival.isoformat()
-        )
-        return []
+    # --- Cache store (entire daily response) ---
+    await cache_set(cache_key, hourly, ttl=settings.cache_ttl_weather)
 
-    precipitation = (hourly.get("precipitation") or [0.0])[idx]
-    snowfall = (hourly.get("snowfall") or [0.0])[idx]
-    wind_speed = (hourly.get("wind_speed_10m") or [0.0])[idx]
-    visibility = (hourly.get("visibility") or [10000.0])[idx]
-
-    return _classify_point_weather(
-        precipitation=precipitation or 0.0,
-        snowfall=snowfall or 0.0,
-        wind_speed=wind_speed or 0.0,
-        visibility=visibility or 10000.0,
-    )
+    return _extract_hour_from_daily(hourly, arrival)
