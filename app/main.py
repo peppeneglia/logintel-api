@@ -1,7 +1,8 @@
 from fastapi import FastAPI
-from app.config import get_settings
 
-settings = get_settings()
+from app.errors import register_error_handlers
+from app.routes.health import router as health_router
+from app.routes.predictions import router as predictions_router
 
 app = FastAPI(
     title="Logintel API",
@@ -9,11 +10,7 @@ app = FastAPI(
     version="0.1.0",
 )
 
+register_error_handlers(app)
 
-@app.get("/v1/health")
-async def health_check():
-    return {
-        "status": "healthy",
-        "version": "0.1.0",
-        "environment": settings.app_env,
-    }
+app.include_router(health_router)
+app.include_router(predictions_router)
