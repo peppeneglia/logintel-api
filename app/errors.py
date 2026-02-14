@@ -7,9 +7,13 @@ All API errors return:
 
 from __future__ import annotations
 
+import logging
+
 from fastapi import FastAPI, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
+
+logger = logging.getLogger(__name__)
 
 from app.models.schemas import ErrorBody, ErrorDetail, ErrorResponse
 
@@ -84,7 +88,8 @@ def register_error_handlers(app: FastAPI) -> None:
         return JSONResponse(status_code=400, content=body.model_dump())
 
     @app.exception_handler(Exception)
-    async def generic_error_handler(_request: Request, _exc: Exception) -> JSONResponse:
+    async def generic_error_handler(_request: Request, exc: Exception) -> JSONResponse:
+        logger.exception("Unhandled exception: %s", exc)
         body = ErrorResponse(
             error=ErrorBody(code="INTERNAL_ERROR", message="An unexpected error occurred")
         )
