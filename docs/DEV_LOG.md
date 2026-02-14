@@ -279,3 +279,212 @@ tests/
   test_services.py     ← 28 test servizi esterni + cache (con mock)
   test_cache.py        ← 13 test cache layer (con fakeredis)
 ```
+
+---
+
+## Blocco 4: Feedback Loop, Calibrazione e Analytics (2026-02-14)
+
+### Obiettivo
+Chiudere il feedback loop: i feedback degli utenti calibrano i coefficienti di predizione e alimentano metriche di accuracy. Analytics endpoint per monitorare le performance del sistema.
+
+### Cosa è stato implementato
+
+#### 1. Calibration Engine (`app/engine/calibration.py`)
+- **Prerequisiti calibrazione** (`check_prerequisites`):
+  - Minimo 20 feedback entries
+  - Span temporale ≥ 14 giorni
+  - Almeno 3 gruppi condizioni meteo distinti
+- **Error factors** (`compute_error_factors`): media di `actual/predicted` per ogni gruppo (WeatherType, Severity)
+- **Formula aggiornamento** (FRD 7.4): `new = old + 0.15 × (error_factor - 1.0) × old`
+- **Clamping**: coefficienti vincolati a [0.5, 2.0] per evitare derive
+- **Historical accuracy** (`compute_historical_accuracy`): % predizioni entro 15 minuti dall'actual, default 70% con <5 feedback
+
+#### 2. Store condivisi (`app/stores/`)
+- **`prediction_store.py`** — Store in-memory per predictions e feedback, estratto da routes per evitare import circolari
+- **`calibration_store.py`** — Store in-memory per versioni calibrazione: coefficienti `dict[(WeatherType, Severity), float]`, versioning seriale
+- **Costanti**: `COEFF_LOWER = 0.5`, `COEFF_UPPER = 2.0`
+
+#### 3. Analytics endpoint (`app/routes/analytics.py`)
+- `GET /v1/analytics/accuracy` → `AnalyticsResponse`:
+  - `total_predictions`, `total_feedback`, `feedback_rate` (%)
+  - `mae` (Mean Absolute Error in minuti)
+  - `within_10min_pct`, `within_20min_pct` (% predizioni entro soglia)
+  - `calibration_version` (versione corrente dei coefficienti)
+  - `breakdown_by_weather` — breakdown per tipo meteo dominante (count, mae, percentuali)
+
+#### 4. Feedback con calibrazione automatica (`app/routes/predictions.py`)
+- `POST /v1/predictions/{id}/feedback` ora triggera `_try_calibrate()`:
+  - Costruisce `CalibrationInput` da tutti i feedback+prediction accoppiati
+  - Verifica prerequisiti → calcola error factors → aggiorna coefficienti
+  - Log della nuova versione calibrazione
+- **Finestra feedback**: 7 giorni dalla departure_time (feedback più vecchi rifiutati)
+- **Feedback duplicati**: un solo feedback per predizione
+
+#### 5. Confidence con accuracy reale (`app/services/prediction.py`)
+- `_get_segment_calibration_factor()` — legge coefficiente calibrazione per condizione meteo dominante del segmento
+- `_compute_real_historical_accuracy()` — calcola accuracy reale da feedback, usata nel confidence score al posto del default 70%
+
+### Test
+117 test totali, tutti passano (+20 nuovi):
+- `test_calibration.py` (12): prerequisiti, error factors, formula coefficienti, clamping, historical accuracy
+- `test_analytics.py` (4): endpoint vuoto, MAE/percentuali, breakdown per meteo, feedback rate
+- `test_api.py` (+4): feedback duplicato, finestra 7 giorni, validazione
+
+### Decisioni tecniche
+| Decisione | Motivazione |
+|---|---|
+| Prerequisiti stringenti (20 feedback, 14 giorni) | Evita calibrazione su dati insufficienti che porterebbe a coefficienti rumorosi |
+| Learning rate 0.15 | Aggiornamento graduale — il sistema converge lentamente ma stabilmente |
+| Clamping [0.5, 2.0] | Safety net: un coefficiente non può mai più che raddoppiare o dimezzare l'impatto |
+| Store in modulo separato | Evita import circolari tra routes, services e engine |
+| Breakdown per weather type | Permette di identificare quale condizione il sistema predice meglio/peggio |
+
+---
+
+## Blocco 5: Supabase Persistence, Auth, Rate Limiting, Deploy (2026-02-14)
+
+### Obiettivo
+Rendere l'API production-ready: persistenza Supabase (dati sopravvivono ai restart), autenticazione JWT/API-key, rate limiting per tier, configurazione deploy Railway.
+
+### Cosa è stato implementato
+
+#### 1. Supabase PostgREST client (`app/services/supabase.py`)
+- Pattern identico a `cache.py`: `init_supabase()` al startup, module-level state, graceful degradation
+- `is_configured()` → bool (controlla `SUPABASE_URL` + `SUPABASE_SERVICE_KEY`)
+- `select(table, params, single)` → GET su PostgREST con filtri, supporto single row
+- `insert(table, data)` → POST con `Prefer: return=representation`
+- Usa `service_role` key (bypassa RLS) per tutte le operazioni
+- Se non configurato → warning al log, stores restano in-memory
+
+#### 2. Store refactoring — classi async (`app/stores/`)
+- **`memory.py`** — `InMemoryPredictionStore` + `InMemoryCalibrationStore`:
+  - Tutti i metodi `async def` per compatibilità di interfaccia
+  - Metodi `sync_*` (es. `save_prediction_sync()`) per setup test senza async
+  - Parametro `org_id` su tutti i metodi (ignorato nell'implementazione in-memory)
+- **`supabase_store.py`** — `SupabasePredictionStore` + `SupabaseCalibrationStore`:
+  - `PredictionResponse` stored come JSONB via `model_dump(mode="json")` / `model_validate()`
+  - Coefficienti calibrazione: chiavi stringa `"rain:moderate"` in JSONB, convertite a/da `tuple[WeatherType, Severity]`
+  - Filtraggio per `org_id` su tutte le query
+- **`__init__.py`** — Factory pattern:
+  - Singletons module-level (start con InMemory)
+  - `init_stores()`: se `supabase.is_configured()`, swap a Supabase implementations
+- **Import pattern**: tutti i consumer usano `import app.stores as stores` + `stores.prediction_store` (attribute access) per garantire che il swap funzioni a runtime
+
+#### 3. Autenticazione (`app/auth.py`)
+- FastAPI dependency `get_current_org(request) → OrgContext`
+- **Dev mode bypass**: se `SUPABASE_URL` vuoto → ritorna org di default (tier=professional, 1000 req/hr)
+  - Tutti i test esistenti passano senza modifiche, senza header di auth
+- **JWT** (`Authorization: Bearer <token>`): decodifica con PyJWT + `supabase_jwt_secret`, estrae `org_id` da `app_metadata`
+- **API Key** (`X-API-Key: <key>`): SHA-256 hash, lookup in tabella `api_keys` via PostgREST
+- `OrgContext` dataclass: `org_id`, `org_name`, `tier`, `rate_limit_hour`, `predictions_limit_month`
+- Health endpoint **sempre pubblico** (nessun `Depends(get_current_org)`)
+
+#### 4. Rate limiting (`app/rate_limit.py`)
+- `RateLimiter` class con `defaultdict[str, deque[float]]`
+- Sliding window 1 ora: prune entries scadute, conta richieste nella finestra
+- `check(org)` → raise `RateLimitError` con `retry_after` se limite superato
+- Singleton module-level `rate_limiter`
+- Applicato solo a `create_prediction` e `submit_feedback` (le GET non consumano risorse esterne)
+- State resetta al restart — accettabile per MVP single-instance
+
+#### 5. Errors update (`app/errors.py`)
+- `RateLimitError` ora ha campo `retry_after: int = 60`
+- Handler aggiunge header `Retry-After` nelle risposte 429
+
+#### 6. Schema SQL (`docs/schema.sql`)
+- `organizations` — id UUID, name, tier (free/starter/professional/enterprise), rate_limit_hour, predictions_limit_month
+- `api_keys` — key_hash SHA-256 (UNIQUE), prefix (primi 8 char), is_active, last_used_at
+- `predictions` — id UUID PK, organization_id FK, data JSONB, total_delay_minutes, departure_time
+- `feedback` — prediction_id FK UNIQUE, actual/predicted/deviation
+- `calibration_versions` — version SERIAL PK, coefficients JSONB, feedback_count
+- Indici su `(org_id, created_at)` per predictions, `prediction_id` per feedback
+
+#### 7. Deploy config
+- **`Procfile`**: `web: uvicorn app.main:app --host 0.0.0.0 --port ${PORT:-8000}`
+- **`requirements.txt`**: aggiunto `PyJWT==2.8.0`
+- **`app/config.py`**: aggiunto `supabase_jwt_secret`
+- **`.env.example`**: aggiunto `SUPABASE_JWT_SECRET`
+
+#### 8. Lifespan (`app/main.py`)
+- Startup: `init_client()` → `init_redis()` → `init_supabase()` → `init_stores()`
+- Shutdown: `close_redis()` → `close_client()`
+
+#### 9. Test infrastructure (`tests/conftest.py`)
+- Fixture `_use_memory_stores` (autouse): inietta fresh `InMemoryPredictionStore` + `InMemoryCalibrationStore` prima di ogni test, ripristina dopo → isolamento totale
+- Fixture `_dev_mode_auth` (autouse): azzera `supabase_url` nelle settings → auth bypass in tutti i test
+- Rimossi fixture `_clear_stores` duplicati da `test_api.py` e `test_analytics.py`
+
+### Test
+129 test totali, tutti passano (+12 nuovi):
+- `test_auth.py` (7): dev mode bypass (2), auth enforced: no auth → 401, invalid JWT → 401, valid JWT → 200, invalid API key → 401, valid API key → 200
+- `test_rate_limit.py` (5): sotto limite, al limite → 429, window expiry, org indipendenti, retry-after value
+- Test esistenti: tutti passano senza modifiche grazie al dev-mode bypass
+
+### Decisioni tecniche
+| Decisione | Motivazione |
+|---|---|
+| httpx diretto su PostgREST (no `supabase-py`) | Il progetto ha già un httpx client condiviso con retry; evita dipendenza pesante |
+| `import app.stores as stores` (non `from ... import`) | Attribute access garantisce che il swap del singleton funzioni a runtime nei test e al startup |
+| Dev mode bypass automatico | `SUPABASE_URL` vuoto → auth skip, in-memory stores — zero config per dev/test |
+| Rate limiting in-memory (no Redis) | Railway free = 1 istanza; risparmia comandi Upstash (budget 10k/day già stretto) |
+| `org_id` param su tutti i metodi store | Multi-tenancy ready; in-memory lo ignora, Supabase filtra |
+| Schema SQL separato (`docs/schema.sql`) | Applicato manualmente via SQL Editor di Supabase — no migration tool necessario |
+| `sync_*` helper nei store | Test setup sincrono senza complessità async (`save_prediction_sync()` ecc.) |
+
+### Modalità operative
+| Ambiente | `SUPABASE_URL` | Auth | Store | Rate Limit |
+|---|---|---|---|---|
+| **Dev/Test** | vuoto | bypass (dev-org) | InMemory | in-memory (1000/hr default) |
+| **Production** | configurato | JWT + API Key | Supabase | in-memory (da org tier) |
+
+### Struttura file finale
+```
+app/
+  main.py              ← Entry point, lifespan (httpx + Redis + Supabase + stores)
+  config.py            ← Settings + supabase_jwt_secret
+  errors.py            ← Eccezioni custom + Retry-After header per 429
+  auth.py              ← JWT/API-key auth con dev-mode bypass
+  rate_limit.py        ← Sliding-window rate limiter in-memory
+  models/
+    schemas.py         ← Tutti i modelli Pydantic
+  engine/
+    heuristics.py      ← Regole meteo + moltiplicatori
+    confidence.py      ← Calcolo confidence score
+    sampler.py         ← Campionamento percorso
+    calibration.py     ← Calibrazione coefficienti da feedback
+  routes/
+    health.py          ← GET /v1/health (sempre pubblico)
+    predictions.py     ← CRUD predictions + feedback + calibrazione auto
+    analytics.py       ← GET /v1/analytics/accuracy
+  services/
+    cache.py           ← Cache Redis (Upstash)
+    http_client.py     ← Client HTTP condiviso con retry
+    ors.py             ← OpenRouteService + cache 24h
+    weather.py         ← Open-Meteo + cache 1h
+    elevation.py       ← Open-Elevation
+    prediction.py      ← Orchestratore pipeline (async store calls)
+    supabase.py        ← PostgREST async client
+  stores/
+    __init__.py        ← Factory: init_stores() swap InMemory ↔ Supabase
+    memory.py          ← InMemoryPredictionStore + InMemoryCalibrationStore
+    supabase_store.py  ← SupabasePredictionStore + SupabaseCalibrationStore
+    calibration_store.py ← Costanti + CalibrationVersion dataclass
+    prediction_store.py  ← (gutted, backward compat only)
+docs/
+  FRD.md             ← Functional Requirements Document
+  DEV_LOG.md         ← Questo file
+  schema.sql         ← Schema SQL per Supabase
+tests/
+  conftest.py          ← Fixture autouse: fresh stores + dev-mode auth
+  test_heuristics.py   ← 17 test
+  test_confidence.py   ← 12 test
+  test_sampler.py      ← 8 test
+  test_api.py          ← 16 test
+  test_services.py     ← 28 test
+  test_cache.py        ← 13 test
+  test_calibration.py  ← 12 test
+  test_analytics.py    ← 4 test
+  test_auth.py         ← 7 test
+  test_rate_limit.py   ← 5 test
+Procfile               ← Railway deploy
+```
