@@ -143,6 +143,25 @@ def get_road_type_at_fraction(
     return RoadType.HIGHWAY
 
 
+def _parse_single_route(route_data: dict) -> RouteResult:
+    """Parse a single ORS route object into a RouteResult."""
+    summary = route_data["summary"]
+    geometry = route_data["geometry"]
+    extra_info = route_data.get("extras", {})
+
+    polyline = decode_polyline(geometry)
+    duration_s = summary["duration"]
+    distance_m = summary["distance"]
+    road_types = _parse_road_types(extra_info, distance_m)
+
+    return RouteResult(
+        polyline=polyline,
+        duration_s=duration_s,
+        distance_m=distance_m,
+        road_types=road_types,
+    )
+
+
 def _route_to_dict(r: RouteResult) -> dict:
     """Serialise RouteResult to a JSON-safe dict for caching."""
     return {
@@ -165,6 +184,16 @@ def _dict_to_route(d: dict) -> RouteResult:
             (s, e, RoadType(rt)) for s, e, rt in d["road_types"]
         ],
     )
+
+
+def _routes_to_dicts(routes: list[RouteResult]) -> list[dict]:
+    """Serialise a list of RouteResults for caching."""
+    return [_route_to_dict(r) for r in routes]
+
+
+def _dicts_to_routes(dicts: list[dict]) -> list[RouteResult]:
+    """Deserialise a cached list of dicts back into RouteResults."""
+    return [_dict_to_route(d) for d in dicts]
 
 
 async def get_route(origin: Coordinate, destination: Coordinate) -> RouteResult:
@@ -207,29 +236,82 @@ async def get_route(origin: Coordinate, destination: Coordinate) -> RouteResult:
     response.raise_for_status()
     data = response.json()
 
-    route = data["routes"][0]
-    summary = route["summary"]
-    geometry = route["geometry"]
-    extra_info = route.get("extras", {})
-
-    polyline = decode_polyline(geometry)
-    duration_s = summary["duration"]
-    distance_m = summary["distance"]
-    road_types = _parse_road_types(extra_info, distance_m)
+    result = _parse_single_route(data["routes"][0])
 
     logger.info(
         "ORS route: %.1f km, %.0f min, %d polyline points",
-        distance_m / 1000, duration_s / 60, len(polyline),
-    )
-
-    result = RouteResult(
-        polyline=polyline,
-        duration_s=duration_s,
-        distance_m=distance_m,
-        road_types=road_types,
+        result.distance_m / 1000, result.duration_s / 60, len(result.polyline),
     )
 
     # --- Cache store ---
     await cache_set(cache_key, _route_to_dict(result), ttl=settings.cache_ttl_route)
 
     return result
+
+
+async def get_routes(
+    origin: Coordinate,
+    destination: Coordinate,
+    include_alternatives: bool = False,
+) -> list[RouteResult]:
+    """
+    Get route(s) from ORS. When include_alternatives is True, requests up to
+    3 routes (1 main + 2 alternatives) in a single ORS API call.
+
+    Uses a separate cache key from get_route to avoid conflicts.
+    When include_alternatives is False, delegates to get_route.
+    """
+    if not include_alternatives:
+        return [await get_route(origin, destination)]
+
+    settings = get_settings()
+    route_hash = compute_route_hash(origin, destination)
+    cache_key = f"route:{route_hash}:alt"
+
+    # --- Cache check ---
+    cached = await cache_get(cache_key)
+    if cached is not None:
+        logger.info("ORS routes (alt) cache HIT (key=%s)", cache_key)
+        return _dicts_to_routes(cached)
+
+    # --- API call with alternatives ---
+    base_url = settings.ors_base_url.rstrip("/")
+    url = f"{base_url}/v2/directions/driving-hgv"
+
+    headers = {
+        "Authorization": settings.ors_api_key,
+        "Content-Type": "application/json",
+    }
+
+    body = {
+        "coordinates": [
+            [origin.lon, origin.lat],
+            [destination.lon, destination.lat],
+        ],
+        "extra_info": ["waytype"],
+        "instructions": False,
+        "geometry": True,
+        "alternative_routes": {
+            "target_count": 2,
+            "share_factor": 0.6,
+            "weight_factor": 1.4,
+        },
+    }
+
+    response = await request_with_retry("POST", url, headers=headers, json=body)
+    response.raise_for_status()
+    data = response.json()
+
+    results = [_parse_single_route(r) for r in data["routes"]]
+
+    logger.info(
+        "ORS routes: %d routes returned (main: %.1f km, %.0f min)",
+        len(results),
+        results[0].distance_m / 1000,
+        results[0].duration_s / 60,
+    )
+
+    # --- Cache store ---
+    await cache_set(cache_key, _routes_to_dicts(results), ttl=settings.cache_ttl_route)
+
+    return results

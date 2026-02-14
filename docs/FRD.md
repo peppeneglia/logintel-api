@@ -345,6 +345,40 @@ Il ritardo totale è la somma dei ritardi di tutti i segmenti.
 | Zona nebbia | Nebbia | × 1.2 - 1.4 |
 | Centro urbano | F_temporale | × 1.3 |
 
+### 6.6 Rotte alternative
+
+Il sistema può suggerire percorsi alternativi quando il ritardo previsto sulla rotta principale supera una soglia configurabile.
+
+**Principi di design:**
+
+- **Soglia di attivazione:** Le alternative vengono calcolate solo se il ritardo previsto sulla rotta principale supera 20 minuti. Sotto questa soglia, il valore aggiunto delle alternative è marginale.
+- **Stessa chiamata ORS:** Le rotte alternative sono richieste nella stessa chiamata API a OpenRouteService (parametro `alternative_routes`), quindi non consumano quota aggiuntiva.
+- **Max 2 alternative:** ORS restituisce fino a 2 percorsi alternativi oltre alla rotta principale.
+- **Pipeline leggera:** Le alternative utilizzano la stessa pipeline di calcolo della rotta principale (sampling, elevazione, meteo, heuristics) ma senza costruire il dettaglio per segmento. Si calcola solo il ritardo totale.
+
+**Parametri ORS per alternative:**
+
+| Parametro | Valore | Descrizione |
+|---|---|---|
+| target_count | 2 | Numero di alternative richieste |
+| share_factor | 0.6 | Massima sovrapposizione con la rotta principale (60%) |
+| weight_factor | 1.4 | Preferenza per rotte significativamente diverse |
+
+**Risposta API:**
+
+Quando `include_alternatives: true` e il ritardo supera la soglia, la risposta include un array `alternatives` con:
+
+| Campo | Descrizione |
+|---|---|
+| route_index | Indice dell'alternativa (1, 2) |
+| total_delay_minutes | Ritardo previsto sull'alternativa |
+| duration_minutes | Tempo di percorrenza base (senza ritardo) |
+| distance_km | Distanza totale dell'alternativa |
+| delay_savings_minutes | Risparmio di ritardo (main_delay - alt_delay) |
+| summary | Descrizione leggibile |
+
+Se il ritardo è sotto soglia o non ci sono alternative valide, l'array è vuoto (`[]`).
+
 ### 6.5 Calcolo del confidence score
 
 Il confidence score è calcolato come media ponderata di quattro componenti:
@@ -483,7 +517,7 @@ OpenRouteService ha il limite più stringente (2.000 req/giorno). Strategie di m
 
 - Cache aggressiva (TTL 24h per percorsi): risparmio 60-70%
 - Route hash per coordinate vicine: risparmio 10-15%
-- Alternative solo se delay > soglia: risparmio 20-30%
+- Alternative solo se delay > 20 minuti: risparmio 20-30%
 
 Con cache efficace, il sistema supporta ~4.400 predizioni/giorno con il free tier.
 

@@ -45,7 +45,10 @@ async def create_prediction(
     rate_limiter.check(org)
 
     prediction = await build_prediction(
-        request.origin, request.destination, request.departure_time
+        request.origin,
+        request.destination,
+        request.departure_time,
+        include_alternatives=request.include_alternatives,
     )
 
     await stores.prediction_store.save_prediction(prediction, org_id=org.org_id)

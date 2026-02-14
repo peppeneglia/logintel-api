@@ -20,6 +20,7 @@ class Settings(BaseSettings):
     max_forecast_hours: int = 72
     cache_ttl_route: int = 86400
     cache_ttl_weather: int = 3600
+    alternative_delay_threshold_minutes: int = 20
 
 
 @lru_cache()

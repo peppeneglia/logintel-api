@@ -34,6 +34,7 @@ from app.engine.sampler import (
     sample_points_from_polyline,
 )
 from app.models.schemas import (
+    AlternativeRoute,
     Coordinate,
     PredictionResponse,
     RoadType,
@@ -42,7 +43,7 @@ from app.models.schemas import (
     WeatherCondition,
 )
 from app.services.elevation import DEFAULT_ELEVATION_M, get_elevations
-from app.services.ors import get_road_type_at_fraction, get_route
+from app.services.ors import RouteResult, get_road_type_at_fraction, get_route, get_routes
 from app.services.weather import get_weather_at_points
 
 logger = logging.getLogger(__name__)
@@ -52,23 +53,26 @@ async def build_prediction(
     origin: Coordinate,
     destination: Coordinate,
     departure_time: datetime,
+    include_alternatives: bool = False,
 ) -> PredictionResponse:
     """
     Execute the full prediction pipeline and return a PredictionResponse.
 
     Steps:
-      1. Get route from ORS (polyline + duration + road types)
+      1. Get route(s) from ORS (polyline + duration + road types)
       2. Sample points along the polyline at configured interval
       3. Fetch elevations for all sample points (batch)
       4. Fetch weather at each point for its estimated arrival time
       5. Calculate delay for each segment using heuristics
       6. Compute confidence score
-      7. Assemble and return PredictionResponse
+      7. Build alternatives if delay exceeds threshold
+      8. Assemble and return PredictionResponse
     """
     settings = get_settings()
 
-    # --- Step 1: Route ---
-    route = await get_route(origin, destination)
+    # --- Step 1: Route(s) ---
+    all_routes = await get_routes(origin, destination, include_alternatives)
+    route = all_routes[0]
 
     # --- Step 2: Sample points ---
     sample_points = sample_points_from_polyline(
@@ -180,7 +184,18 @@ async def build_prediction(
         historical_accuracy=historical_accuracy,
     )
 
-    # --- Step 7: Assemble response ---
+    # --- Step 7: Alternatives (lightweight pipeline) ---
+    alternatives: list[AlternativeRoute] = []
+    if (
+        include_alternatives
+        and total_delay > settings.alternative_delay_threshold_minutes
+        and len(all_routes) > 1
+    ):
+        alternatives = await _build_alternatives(
+            all_routes[1:], departure_time, total_delay
+        )
+
+    # --- Step 8: Assemble response ---
     return PredictionResponse(
         origin=origin,
         destination=destination,
@@ -188,6 +203,106 @@ async def build_prediction(
         total_delay_minutes=round(total_delay, 2),
         confidence=confidence,
         segments=segments,
+        alternatives=alternatives,
+    )
+
+
+async def _compute_route_delay(route: RouteResult, departure_time: datetime) -> float:
+    """
+    Lightweight pipeline: compute total delay for a route without building SegmentDetail.
+
+    Same logic as the main pipeline (sample → elevation → weather → heuristics)
+    but only returns the total delay minutes.
+    """
+    settings = get_settings()
+
+    sample_points = sample_points_from_polyline(
+        route.polyline, interval_km=float(settings.sampling_interval_km)
+    )
+    if len(sample_points) < 2:
+        return 0.0
+
+    arrival_times = estimate_arrival_times(
+        sample_points, departure_time, total_duration_seconds=route.duration_s
+    )
+
+    try:
+        elevations = await get_elevations(
+            sample_points, base_url=settings.open_elevation_base_url
+        )
+    except Exception:
+        elevations = [DEFAULT_ELEVATION_M] * len(sample_points)
+
+    weather_per_point = await get_weather_at_points(
+        sample_points, arrival_times, base_url=settings.open_meteo_base_url
+    )
+
+    segment_lengths = compute_segment_lengths(sample_points)
+    total_distance = route.distance_m / 1000.0
+    total_delay = 0.0
+
+    for i in range(len(segment_lengths)):
+        seg_km = segment_lengths[i]
+        altitude = elevations[i] if i < len(elevations) else DEFAULT_ELEVATION_M
+        fraction = (sum(segment_lengths[:i]) / total_distance) if total_distance > 0 else 0.0
+        road_type = get_road_type_at_fraction(route.road_types, fraction)
+        conditions = weather_per_point[i] if i < len(weather_per_point) else []
+        cal_factor = await _get_segment_calibration_factor(conditions)
+
+        delay = calculate_segment_delay(
+            weather_conditions=conditions,
+            segment_km=seg_km,
+            road_type=road_type,
+            altitude_m=altitude,
+            arrival_time=arrival_times[i],
+            calibration_factor=cal_factor,
+        )
+        total_delay += delay
+
+    return round(total_delay, 2)
+
+
+async def _build_alternatives(
+    alt_routes: list[RouteResult],
+    departure_time: datetime,
+    main_delay: float,
+) -> list[AlternativeRoute]:
+    """Build AlternativeRoute objects for each alternative route."""
+    alternatives: list[AlternativeRoute] = []
+
+    for idx, route in enumerate(alt_routes, start=1):
+        alt_delay = await _compute_route_delay(route, departure_time)
+        savings = round(main_delay - alt_delay, 2)
+        summary = _build_alternative_summary(idx, savings, route)
+
+        alternatives.append(
+            AlternativeRoute(
+                route_index=idx,
+                total_delay_minutes=alt_delay,
+                duration_minutes=round(route.duration_s / 60.0, 1),
+                distance_km=round(route.distance_m / 1000.0, 1),
+                delay_savings_minutes=savings,
+                summary=summary,
+            )
+        )
+
+    return alternatives
+
+
+def _build_alternative_summary(
+    index: int, savings: float, route: RouteResult
+) -> str:
+    """Build a human-readable summary for an alternative route."""
+    dist_km = round(route.distance_m / 1000.0, 1)
+    dur_min = round(route.duration_s / 60.0, 0)
+    if savings > 0:
+        return (
+            f"Alternative {index}: {dist_km} km, {dur_min:.0f} min base travel, "
+            f"saves {savings:.0f} min delay"
+        )
+    return (
+        f"Alternative {index}: {dist_km} km, {dur_min:.0f} min base travel, "
+        f"no delay improvement"
     )
 
 

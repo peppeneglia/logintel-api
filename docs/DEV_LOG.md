@@ -488,3 +488,78 @@ tests/
   test_rate_limit.py   ← 5 test
 Procfile               ← Railway deploy
 ```
+
+---
+
+## Blocco 6: Rotte Alternative (2026-02-14)
+
+### Obiettivo
+Suggerire percorsi alternativi quando il ritardo previsto sulla rotta principale supera una soglia (20 min). Alternative calcolate con una pipeline leggera (solo delay totale, senza dettaglio per segmento) nella stessa chiamata ORS (0 costi aggiuntivi).
+
+### Cosa è stato implementato
+
+#### 1. Configurazione soglia (`app/config.py`)
+- `alternative_delay_threshold_minutes: int = 20` — soglia sotto la quale le alternative non vengono calcolate
+
+#### 2. Modelli (`app/models/schemas.py`)
+- **`AlternativeRoute`** — nuovo modello con: `route_index`, `total_delay_minutes`, `duration_minutes`, `distance_km`, `delay_savings_minutes`, `summary`
+- **`PredictionResponse`** — aggiunto campo `alternatives: list[AlternativeRoute] = []` (backward compatible)
+
+#### 3. Refactor ORS (`app/services/ors.py`)
+- **`_parse_single_route(route_data)`** — estratta logica di parsing da `get_route()`, riutilizzata per parsare ogni route nella risposta multi-route
+- **`get_routes(origin, dest, include_alternatives)`** — nuova funzione:
+  - `include_alternatives=False` → delega a `get_route()`, ritorna `[RouteResult]`
+  - `include_alternatives=True` → chiama ORS con `alternative_routes: {target_count: 2, share_factor: 0.6, weight_factor: 1.4}`
+  - Cache key separata: `route:{hash}:alt`
+- **`_routes_to_dicts()` / `_dicts_to_routes()`** — serializzazione lista per cache
+
+#### 4. Pipeline alternative (`app/services/prediction.py`)
+- `build_prediction()` — nuovo parametro `include_alternatives: bool = False`
+- Usa `get_routes()` invece di `get_route()`: `all_routes[0]` → pipeline completa, `all_routes[1:]` → pipeline leggera (se delay > soglia)
+- **`_compute_route_delay(route, departure)`** — stessa pipeline (sample → elevation → weather → heuristics) ma ritorna solo il delay totale
+- **`_build_alternatives(alt_routes, departure, main_delay)`** — costruisce `list[AlternativeRoute]`
+- **`_build_alternative_summary(index, savings, route)`** — stringa leggibile con km, minuti e risparmio
+
+#### 5. Route handler (`app/routes/predictions.py`)
+- Passthrough: `include_alternatives=request.include_alternatives` a `build_prediction()`
+
+### Test
+141 test totali, tutti passano (+12 nuovi):
+- `test_alternatives.py` (12):
+  - `get_routes`: senza alternative (1 route), con alternative (2 routes), cache hit, ORS ritorna 1 sola route
+  - `build_prediction`: default → alternatives=[], delay sotto soglia → alternatives=[], delay sopra soglia → alternatives popolate
+  - Helpers: delay_savings calcolo, summary con savings, summary no improvement
+  - Backward compatibility: PredictionResponse senza alternatives → default []
+  - API integration: POST con include_alternatives → JSON con alternatives
+
+### Flusso completo
+```
+POST /v1/predictions { include_alternatives: true }
+  │
+  ├─ [ORS] 1 sola chiamata → rotta principale + 2 alternative
+  │
+  ├─ [Pipeline completa] sulla rotta principale → delay = 45 min
+  │
+  ├─ delay > 20 min soglia? SÌ
+  │
+  ├─ [Pipeline leggera] sulle alternative (solo delay totale)
+  │
+  └─ Risposta: rotta principale + alternatives con delay_savings
+```
+
+### Decisioni tecniche
+| Decisione | Motivazione |
+|---|---|
+| Soglia 20 minuti | Sotto questa soglia l'alternativa non ha valore significativo per l'utente |
+| Stessa chiamata ORS | `alternative_routes` param nella stessa POST → 0 costi aggiuntivi quota |
+| Cache key separata `:alt` | Evita conflitti con cache single-route esistente |
+| Pipeline leggera (no SegmentDetail) | Riduce complessità risposta e tempo di calcolo per le alternative |
+| Default `alternatives: []` | Backward compatible — client esistenti non vedono cambiamenti |
+| `share_factor: 0.6` | ORS genera alternative che condividono max 60% della rotta principale |
+
+### Budget impatto
+| Scenario | Costi aggiuntivi ORS | Costi weather/elevation |
+|---|---|---|
+| `include_alternatives=false` | 0 | 0 |
+| `include_alternatives=true`, delay ≤ 20 min | 0 (stessa chiamata) | 0 (alternative non calcolate) |
+| `include_alternatives=true`, delay > 20 min | 0 (stessa chiamata) | ~2× per le alternative |

@@ -121,6 +121,17 @@ class ConfidenceComponents(BaseModel):
 ConfidenceScore.model_rebuild()
 
 
+# --- Alternative route model ---
+
+class AlternativeRoute(BaseModel):
+    route_index: int = Field(..., description="Alternative index (1, 2)")
+    total_delay_minutes: float = Field(..., description="Predicted delay for this alternative")
+    duration_minutes: float = Field(..., description="Base travel time without delay")
+    distance_km: float = Field(..., description="Total route distance in km")
+    delay_savings_minutes: float = Field(..., description="Delay saved vs main route (main_delay - alt_delay)")
+    summary: str = Field(..., description="Human-readable summary")
+
+
 # --- Response models ---
 
 class PredictionResponse(BaseModel):
@@ -132,6 +143,7 @@ class PredictionResponse(BaseModel):
     total_delay_minutes: float
     confidence: ConfidenceScore
     segments: list[SegmentDetail]
+    alternatives: list[AlternativeRoute] = Field(default_factory=list)
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
 
