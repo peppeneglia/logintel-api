@@ -21,6 +21,9 @@ class Settings(BaseSettings):
     cache_ttl_route: int = 86400
     cache_ttl_weather: int = 3600
     alternative_delay_threshold_minutes: int = 20
+    enable_special_elements: bool = True
+    cache_ttl_osm: int = 604800  # 7 days
+    overpass_base_url: str = "https://overpass-api.de"
 
 
 @lru_cache()

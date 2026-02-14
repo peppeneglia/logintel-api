@@ -4,6 +4,8 @@ from fastapi import FastAPI
 
 from app.config import get_settings
 from app.errors import register_error_handlers
+from app.logging_config import setup_logging
+from app.middleware import RequestIdMiddleware, TimingMiddleware
 from app.routes.analytics import router as analytics_router
 from app.routes.health import router as health_router
 from app.routes.predictions import router as predictions_router
@@ -16,8 +18,9 @@ from app.stores import init_stores
 @asynccontextmanager
 async def lifespan(application: FastAPI):
     """Manage startup/shutdown of shared resources."""
-    init_client()
     settings = get_settings()
+    setup_logging(settings.log_level)
+    init_client()
     init_redis(settings.upstash_redis_url)
     init_supabase()
     init_stores()
@@ -34,6 +37,11 @@ app = FastAPI(
 )
 
 register_error_handlers(app)
+
+# Middleware order: TimingMiddleware wraps RequestIdMiddleware
+# (added in reverse — last added runs first)
+app.add_middleware(TimingMiddleware)
+app.add_middleware(RequestIdMiddleware)
 
 app.include_router(health_router)
 app.include_router(predictions_router)

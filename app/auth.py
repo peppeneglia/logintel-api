@@ -16,6 +16,7 @@ from fastapi import Request
 
 from app.config import get_settings
 from app.errors import UnauthorizedError
+from app.logging_config import org_id_var
 
 logger = logging.getLogger(__name__)
 
@@ -44,6 +45,7 @@ async def get_current_org(request: Request) -> OrgContext:
 
     # Dev mode bypass — no Supabase configured
     if not settings.supabase_url:
+        org_id_var.set("dev")
         return _DEV_ORG
 
     # Try Bearer JWT first
@@ -110,10 +112,12 @@ async def _fetch_org(org_id: str) -> OrgContext:
     if row is None:
         raise UnauthorizedError("Organization not found")
 
-    return OrgContext(
+    org = OrgContext(
         org_id=row["id"],
         org_name=row["name"],
         tier=row["tier"],
         rate_limit_hour=row.get("rate_limit_hour", 100),
         predictions_limit_month=row.get("predictions_limit_month", 1000),
     )
+    org_id_var.set(org.org_id)
+    return org

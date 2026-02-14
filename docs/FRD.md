@@ -337,13 +337,19 @@ Il ritardo totale è la somma dei ritardi di tutti i segmenti.
 
 ### 6.4 Elementi speciali del percorso
 
-| Elemento | Impatto | Modifica |
-|---|---|---|
-| Tunnel > 500m | Tutti i fattori meteo | = 0 per lunghezza tunnel |
-| Ponte/viadotto | Vento, ghiaccio | × 1.2 - 1.5 |
-| Valico | Neve | × 1.8 - 2.0 |
-| Zona nebbia | Nebbia | × 1.2 - 1.4 |
-| Centro urbano | F_temporale | × 1.3 |
+| Elemento | Impatto | Modifica | Implementazione |
+|---|---|---|---|
+| Tunnel > 500m | Tutti i fattori meteo | = 0 per lunghezza tunnel | `weather_multiplier = 0.0` |
+| Ponte/viadotto | Vento, neve | × 1.3 (midpoint range 1.2-1.5) | Solo se condizioni vento o neve presenti |
+| Valico | Neve | × 1.9 (midpoint range 1.8-2.0) | Solo se condizioni neve presenti |
+| Zona nebbia | Nebbia | × 1.2 - 1.4 | Skip per MVP (no tag OSM diretto) |
+| Centro urbano | F_temporale | × 1.3 | `time_multiplier = 1.3` |
+
+**Fonte dati:** Overpass API (OpenStreetMap) — gratuita, no API key. Query: `tunnel=yes`, `bridge=yes`, `mountain_pass=yes`, `place=city|town`. Cache 7 giorni (infrastruttura statica).
+
+**Precedenza tunnel:** Se un segmento attraversa un tunnel > 500m, il weather_multiplier è 0.0 indipendentemente da altri elementi (ponte, valico). Il time_multiplier di urban center si applica sempre.
+
+**Graceful degradation:** Se Overpass API è down, gli elementi speciali vengono ignorati (lista vuota) e le predizioni restano invariate.
 
 ### 6.6 Rotte alternative
 

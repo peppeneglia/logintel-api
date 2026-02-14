@@ -228,6 +228,8 @@ def calculate_segment_delay(
     altitude_m: float,
     arrival_time: datetime,
     calibration_factor: float = 1.0,
+    special_element_weather_multiplier: float = 1.0,
+    special_element_time_multiplier: float = 1.0,
 ) -> float:
     """
     Calculate total delay for a single segment.
@@ -235,18 +237,25 @@ def calculate_segment_delay(
     Sums delays from all active weather conditions on the segment.
     Formula per condition:
         delay = base_impact x F_road x F_altitude x F_time x C_calibration x (km/100)
+
+    Special element multipliers (FRD 6.4):
+        - special_element_weather_multiplier: applied to each weather condition delay
+          (0.0 for tunnels = annuls all weather delay)
+        - special_element_time_multiplier: applied to the time factor
+          (1.3 for urban centers)
     """
     if not weather_conditions:
         return 0.0
 
     f_road = get_road_factor(road_type)
     f_altitude = get_altitude_factor(altitude_m)
-    f_time = get_time_factor(arrival_time)
+    f_time = get_time_factor(arrival_time) * special_element_time_multiplier
 
     total_delay = 0.0
     for condition in weather_conditions:
         base = get_base_impact(condition)
         delay = base * f_road * f_altitude * f_time * calibration_factor
+        delay *= special_element_weather_multiplier
         effective_delay = delay * (segment_km / 100.0)
         total_delay += effective_delay
 

@@ -31,6 +31,13 @@ class RoadType(str, Enum):
     MOUNTAIN = "mountain"
 
 
+class SpecialElementType(str, Enum):
+    TUNNEL = "tunnel"
+    BRIDGE = "bridge"
+    MOUNTAIN_PASS = "mountain_pass"
+    URBAN_CENTER = "urban_center"
+
+
 class ConfidenceLevel(str, Enum):
     HIGH = "high"           # 85-100%
     GOOD = "good"           # 70-84%
@@ -84,6 +91,20 @@ class WeatherCondition(BaseModel):
     description: str = Field(..., description="Human-readable description")
 
 
+class SpecialElement(BaseModel):
+    type: SpecialElementType
+    name: Optional[str] = None
+    length_m: Optional[float] = None  # For tunnels
+    lat: float
+    lon: float
+
+
+class SpecialElementFactor(BaseModel):
+    element_type: SpecialElementType
+    element_name: Optional[str] = None
+    multiplier: float
+
+
 class SegmentFactors(BaseModel):
     road_type: RoadType
     road_factor: float
@@ -91,6 +112,7 @@ class SegmentFactors(BaseModel):
     altitude_factor: float
     time_factor: float
     calibration_factor: float = 1.0
+    special_elements: list[SpecialElementFactor] = Field(default_factory=list)
 
 
 class SegmentDetail(BaseModel):

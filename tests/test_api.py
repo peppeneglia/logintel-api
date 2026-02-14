@@ -80,8 +80,10 @@ class TestHealthEndpoint:
         resp = client.get("/v1/health")
         assert resp.status_code == 200
         data = resp.json()
-        assert data["status"] == "healthy"
+        assert data["status"] in ("healthy", "degraded")
         assert "version" in data
+        assert "dependencies" in data
+        assert "metrics" in data
 
 
 class TestPredictionEndpoints:

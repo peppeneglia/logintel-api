@@ -33,6 +33,10 @@ from app.engine.sampler import (
     estimate_arrival_times,
     sample_points_from_polyline,
 )
+from app.engine.special_elements import (
+    compute_special_element_modifier,
+    find_elements_for_segment,
+)
 from app.models.schemas import (
     AlternativeRoute,
     Coordinate,
@@ -40,10 +44,12 @@ from app.models.schemas import (
     RoadType,
     SegmentDetail,
     SegmentFactors,
+    SpecialElement,
     WeatherCondition,
 )
 from app.services.elevation import DEFAULT_ELEVATION_M, get_elevations
 from app.services.ors import RouteResult, get_road_type_at_fraction, get_route, get_routes
+from app.services.overpass import get_special_elements
 from app.services.weather import get_weather_at_points
 
 logger = logging.getLogger(__name__)
@@ -100,6 +106,14 @@ async def build_prediction(
         elevations = [DEFAULT_ELEVATION_M] * len(sample_points)
         elevation_failed = True
 
+    # --- Step 3.5: Special route elements (FRD 6.4) ---
+    special_elements: list[SpecialElement] = []
+    if settings.enable_special_elements:
+        try:
+            special_elements = await get_special_elements(route.polyline)
+        except Exception:
+            logger.warning("Special elements fetch failed — skipping")
+
     # --- Step 4: Weather (per-point, with fallback) ---
     weather_per_point = await get_weather_at_points(
         sample_points, arrival_times, base_url=settings.open_meteo_base_url
@@ -140,6 +154,19 @@ async def build_prediction(
         # Get dynamic calibration factor from dominant condition
         cal_factor = await _get_segment_calibration_factor(conditions)
 
+        # Special element modifiers (FRD 6.4)
+        se_weather_mult = 1.0
+        se_time_mult = 1.0
+        se_factors = []
+        if special_elements:
+            seg_elements = find_elements_for_segment(
+                start_pt, end_pt, special_elements
+            )
+            if seg_elements:
+                se_weather_mult, se_time_mult, se_factors = (
+                    compute_special_element_modifier(seg_elements, conditions)
+                )
+
         # Calculate delay
         delay = calculate_segment_delay(
             weather_conditions=conditions,
@@ -148,6 +175,8 @@ async def build_prediction(
             altitude_m=altitude,
             arrival_time=est_arrival,
             calibration_factor=cal_factor,
+            special_element_weather_multiplier=se_weather_mult,
+            special_element_time_multiplier=se_time_mult,
         )
         total_delay += delay
 
@@ -158,6 +187,7 @@ async def build_prediction(
             altitude_factor=get_altitude_factor(altitude),
             time_factor=get_time_factor(est_arrival),
             calibration_factor=cal_factor,
+            special_elements=se_factors,
         )
 
         segments.append(
@@ -233,6 +263,14 @@ async def _compute_route_delay(route: RouteResult, departure_time: datetime) -> 
     except Exception:
         elevations = [DEFAULT_ELEVATION_M] * len(sample_points)
 
+    # Special elements for lightweight pipeline
+    special_elements: list[SpecialElement] = []
+    if settings.enable_special_elements:
+        try:
+            special_elements = await get_special_elements(route.polyline)
+        except Exception:
+            pass
+
     weather_per_point = await get_weather_at_points(
         sample_points, arrival_times, base_url=settings.open_meteo_base_url
     )
@@ -243,11 +281,25 @@ async def _compute_route_delay(route: RouteResult, departure_time: datetime) -> 
 
     for i in range(len(segment_lengths)):
         seg_km = segment_lengths[i]
+        start_pt = sample_points[i]
+        end_pt = sample_points[i + 1]
         altitude = elevations[i] if i < len(elevations) else DEFAULT_ELEVATION_M
         fraction = (sum(segment_lengths[:i]) / total_distance) if total_distance > 0 else 0.0
         road_type = get_road_type_at_fraction(route.road_types, fraction)
         conditions = weather_per_point[i] if i < len(weather_per_point) else []
         cal_factor = await _get_segment_calibration_factor(conditions)
+
+        # Special element modifiers
+        se_weather_mult = 1.0
+        se_time_mult = 1.0
+        if special_elements:
+            seg_elements = find_elements_for_segment(
+                start_pt, end_pt, special_elements
+            )
+            if seg_elements:
+                se_weather_mult, se_time_mult, _ = (
+                    compute_special_element_modifier(seg_elements, conditions)
+                )
 
         delay = calculate_segment_delay(
             weather_conditions=conditions,
@@ -256,6 +308,8 @@ async def _compute_route_delay(route: RouteResult, departure_time: datetime) -> 
             altitude_m=altitude,
             arrival_time=arrival_times[i],
             calibration_factor=cal_factor,
+            special_element_weather_multiplier=se_weather_mult,
+            special_element_time_multiplier=se_time_mult,
         )
         total_delay += delay
 

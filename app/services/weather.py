@@ -92,7 +92,7 @@ async def get_weather_at_points(
             results.append(conditions)
         except Exception:
             logger.warning(
-                "Weather fetch failed for (%.4f, %.4f) at %s — using clear sky",
+                "Weather fetch failed for (%.2f, %.2f) at %s — using clear sky",
                 point.lat, point.lon, arrival.isoformat(),
                 exc_info=True,
             )

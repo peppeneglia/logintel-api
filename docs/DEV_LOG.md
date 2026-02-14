@@ -563,3 +563,149 @@ POST /v1/predictions { include_alternatives: true }
 | `include_alternatives=false` | 0 | 0 |
 | `include_alternatives=true`, delay ≤ 20 min | 0 (stessa chiamata) | 0 (alternative non calcolate) |
 | `include_alternatives=true`, delay > 20 min | 0 (stessa chiamata) | ~2× per le alternative |
+
+---
+
+## Blocco 7B: Monitoring e Observability (2026-02-14)
+
+### Obiettivo
+Infrastruttura di logging strutturato, metriche in-memory e health check arricchito. Prerequisito per il Blocco 7A che ne beneficia automaticamente.
+
+### Cosa è stato implementato
+
+#### 1. Structured JSON Logging (`app/logging_config.py`)
+- `ContextVar` per `request_id` e `org_id` — propagazione async-safe attraverso tutto il request lifecycle
+- `LogintelJsonFormatter` — ogni riga di log è JSON con: `timestamp`, `level`, `logger`, `message`, `request_id`, `organization_id`
+- `setup_logging(log_level)` — configura root logger con JSON su stdout, silenzia `uvicorn.access` e `httpx`
+
+#### 2. In-memory Metrics (`app/metrics.py`)
+- `MetricsCollector` thread-safe (singleton):
+  - `record_request()` — contatore richieste + errori 5xx, salva latenze
+  - `record_cache_hit()` / `record_cache_miss()` — contatori cache
+  - `snapshot()` → `MetricsSnapshot`: error_rate (finestra 120s), latency p50/p95/p99, cache hit rate, uptime
+
+#### 3. ASGI Middleware (`app/middleware.py`)
+- `RequestIdMiddleware` — genera UUID o propaga `X-Request-ID` dal client, setta `request_id_var`, aggiunge header in risposta
+- `TimingMiddleware` — misura durata richiesta, chiama `metrics_collector.record_request()`
+
+#### 4. Modifiche file esistenti
+- **`app/main.py`** — `setup_logging()` all'inizio del lifespan, middleware registrati
+- **`app/auth.py`** — `org_id_var.set()` in dev mode e dopo `_fetch_org()`
+- **`app/services/cache.py`** — `record_cache_hit()`/`record_cache_miss()` in `cache_get()`
+- **`app/routes/health.py`** — Health check arricchito con dependencies (Redis ping), metrics snapshot, status `degraded` se Redis unhealthy
+- **`app/services/weather.py`** — Coordinate nei log arrotondate a 2 decimali (~1.1km) per privacy
+
+### Test
+181 test totali, tutti passano (+18 nuovi `test_monitoring.py`):
+- `TestMetricsCollector` (9): record_request, error_rate 5xx, error_rate zero, latency percentiles, latency empty, cache hit/miss, cache rate zero, uptime, snapshot fields
+- `TestRequestIdMiddleware` (2): genera request_id, preserva client request_id
+- `TestTimingMiddleware` (1): registra durata
+- `TestHealthEndpoint` (3): dependencies presenti, metrics presenti, status degraded con Redis down
+- `TestStructuredLogging` (3): output JSON valido, request_id nei log, org_id nei log
+
+### Decisioni tecniche
+| Decisione | Motivazione |
+|---|---|
+| `ContextVar` (non threading.local) | Async-safe — funziona con FastAPI/asyncio |
+| Metrics in-memory (no Prometheus) | Zero costo, Railway free = 1 istanza |
+| Error rate sliding window 120s | Finestra breve per rilevare spike in tempo reale |
+| Import inline in `cache.py` | Evita import circolari (`metrics` → `cache` → `metrics`) |
+| Redis ping per health | Unica dipendenza critica da monitorare |
+
+---
+
+## Blocco 7A: Elementi Speciali del Percorso (2026-02-14)
+
+### Obiettivo
+Considerare tunnel, ponti, valichi e centri urbani nel calcolo del ritardo (FRD 6.4). Dati da Overpass API (OpenStreetMap), gratuita e senza API key.
+
+### Cosa è stato implementato
+
+#### 1. Configurazione (`app/config.py`)
+- `enable_special_elements: bool = True` — feature flag per disabilitare
+- `cache_ttl_osm: int = 604800` — cache 7 giorni (infrastruttura statica)
+- `overpass_base_url: str = "https://overpass-api.de"`
+
+#### 2. Modelli (`app/models/schemas.py`)
+- `SpecialElementType(str, Enum)`: TUNNEL, BRIDGE, MOUNTAIN_PASS, URBAN_CENTER
+- `SpecialElement(BaseModel)`: type, name, length_m (tunnel), lat, lon
+- `SpecialElementFactor(BaseModel)`: element_type, element_name, multiplier
+- `SegmentFactors.special_elements: list[SpecialElementFactor] = []` (backward compatible)
+
+#### 3. Overpass API client (`app/services/overpass.py`)
+- `_compute_route_bbox(polyline, padding_deg=0.05)` — bounding box dalla polyline
+- `_build_overpass_query(bbox)` — query QL per tunnel, bridge, mountain_pass, city/town
+- `_parse_overpass_response(data)` — parse JSON, filtra tunnel < 500m
+- `get_special_elements(polyline)` — fetch con cache 7d, fallback lista vuota
+- Pattern identico a `elevation.py`: async, `request_with_retry`, graceful degradation
+
+#### 4. Special Elements Engine (`app/engine/special_elements.py`)
+- `ELEMENT_MULTIPLIERS`: tunnel 0.0, bridge 1.3, mountain_pass 1.9, urban_center 1.3
+- `find_elements_for_segment()` — filtra per distanza dal midpoint (5km default)
+- `compute_special_element_modifier()` → `(weather_multiplier, time_multiplier, factors)`
+  - Tunnel → `weather_multiplier = 0.0` (annulla tutto)
+  - Bridge → amplifica delay per WIND e SNOW
+  - Mountain pass → amplifica delay per SNOW
+  - Urban center → `time_multiplier = 1.3`
+  - Tunnel ha precedenza assoluta
+
+#### 5. Heuristics update (`app/engine/heuristics.py`)
+- `calculate_segment_delay()` — 2 parametri opzionali:
+  - `special_element_weather_multiplier: float = 1.0`
+  - `special_element_time_multiplier: float = 1.0`
+- Backward compatible: default 1.0 = nessun cambiamento
+
+#### 6. Pipeline integration (`app/services/prediction.py`)
+- Step 3.5: `get_special_elements(route.polyline)` con try/except → fallback vuoto
+- Nel loop segmenti: `find_elements_for_segment()` → `compute_special_element_modifier()` → passare multipliers a `calculate_segment_delay()`
+- Stessa logica anche in `_compute_route_delay()` (pipeline leggera per alternative)
+
+### Test
+181 test totali, tutti passano (+22 nuovi `test_special_elements.py`):
+- `TestSpecialElementModifiers` (10): tunnel annulla meteo, bridge amplifica vento, bridge no effetto su pioggia, bridge amplifica neve, mountain pass amplifica neve, mountain pass no effetto senza neve, urban center amplifica tempo, tunnel override altri elementi, multipli si combinano, nessun elemento → no modifica
+- `TestFindElementsForSegment` (2): elemento vicino incluso, elemento lontano escluso
+- `TestOverpassService` (6): bbox computation, parse tunnel+bridge, parse mountain pass+urban, fallback su errore, success, cache hit
+- `TestHeuristicsWithSpecialElements` (4): delay con tunnel = 0, delay con bridge aumentato, default params invariati, urban center time multiplier
+
+### Budget impatto
+| Scenario | Costi Overpass | Nota |
+|---|---|---|
+| `enable_special_elements=true` | 1 query per rotta (cached 7d) | Bounding box dell'intera rotta |
+| `enable_special_elements=false` | 0 | Feature disabilitata |
+| Overpass down | 0 | Graceful degradation → predizioni invariate |
+
+### Decisioni tecniche
+| Decisione | Motivazione |
+|---|---|
+| Overpass API (non altro) | Gratuita, no API key, menzionata nel FRD 3.1 |
+| Cache 7 giorni | Infrastruttura stradale cambia raramente |
+| Fog zone skip | Nessun tag OSM diretto per zone nebbia — rimandato a versione futura |
+| Proximity 5km | Bilancia precisione e tolleranza GPS/routing |
+| Tunnel < 500m filtrati | Sotto 500m il tunnel non offre protezione significativa dal meteo |
+| Tunnel ha precedenza assoluta | Se sei in galleria, non importa che ci sia anche un ponte |
+
+### Struttura file aggiornata
+```
+app/
+  main.py              ← + setup_logging() + middleware
+  config.py            ← + enable_special_elements, cache_ttl_osm, overpass_base_url
+  logging_config.py    ← NUOVO: ContextVars + JSON formatter
+  metrics.py           ← NUOVO: MetricsCollector in-memory
+  middleware.py        ← NUOVO: RequestId + Timing middleware
+  auth.py              ← + org_id_var.set()
+  models/
+    schemas.py         ← + SpecialElementType, SpecialElement, SpecialElementFactor
+  engine/
+    heuristics.py      ← + special_element_weather/time_multiplier params
+    special_elements.py ← NUOVO: multipliers + proximity filter + modifier computation
+  routes/
+    health.py          ← Arricchito con dependencies + metrics
+  services/
+    cache.py           ← + cache hit/miss metrics
+    overpass.py        ← NUOVO: Overpass API client
+    prediction.py      ← + step 3.5 special elements integration
+    weather.py         ← Coordinate privacy nei log
+tests/
+  test_monitoring.py   ← NUOVO: 18 test
+  test_special_elements.py ← NUOVO: 22 test
+```

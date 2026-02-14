@@ -46,10 +46,16 @@ async def cache_get(key: str) -> dict | list | None:
     try:
         raw = await _redis.get(key)
         if raw is None:
+            from app.metrics import metrics_collector
+            metrics_collector.record_cache_miss()
             return None
+        from app.metrics import metrics_collector
+        metrics_collector.record_cache_hit()
         return json.loads(raw)
     except Exception:
         logger.warning("Redis GET failed for key=%s", key, exc_info=True)
+        from app.metrics import metrics_collector
+        metrics_collector.record_cache_miss()
         return None
 
 
