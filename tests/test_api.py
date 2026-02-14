@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from unittest.mock import AsyncMock, patch
 
 import pytest
@@ -19,8 +19,19 @@ from app.models.schemas import (
     SegmentDetail,
     SegmentFactors,
 )
+from app.stores import calibration_store, prediction_store
 
 client = TestClient(app)
+
+
+@pytest.fixture(autouse=True)
+def _clear_stores():
+    """Clear all stores before and after each test."""
+    prediction_store.clear_all()
+    calibration_store.clear_all()
+    yield
+    prediction_store.clear_all()
+    calibration_store.clear_all()
 
 
 def _make_stub_prediction(
@@ -85,16 +96,19 @@ class TestHealthEndpoint:
 
 
 class TestPredictionEndpoints:
-    def _create_prediction(self):
+    def _create_prediction(self, departure_time: str = "2026-02-15T08:00:00+01:00"):
         payload = {
             "origin": {"lat": 45.464, "lon": 9.190},
             "destination": {"lat": 41.902, "lon": 12.496},
-            "departure_time": "2026-02-15T08:00:00+01:00",
+            "departure_time": departure_time,
         }
+        stub = _make_stub_prediction(
+            departure_time=datetime.fromisoformat(departure_time),
+        )
         with patch(
             "app.routes.predictions.build_prediction",
             new_callable=AsyncMock,
-            return_value=_make_stub_prediction(),
+            return_value=stub,
         ):
             return client.post("/v1/predictions", json=payload)
 
@@ -152,6 +166,23 @@ class TestPredictionEndpoints:
         resp = client.post(f"/v1/predictions/{pred_id}/feedback", json=payload)
         assert resp.status_code == 400
         assert resp.json()["error"]["code"] == "INVALID_REQUEST"
+
+    def test_feedback_rejected_after_7_days(self):
+        """Feedback for predictions with departure > 7 days ago should be rejected."""
+        # Create a prediction with departure_time 10 days in the past
+        old_departure = datetime.now(timezone.utc) - timedelta(days=10)
+        old_departure_str = old_departure.isoformat()
+
+        create_resp = self._create_prediction(departure_time=old_departure_str)
+        pred_id = create_resp.json()["id"]
+
+        resp = client.post(
+            f"/v1/predictions/{pred_id}/feedback",
+            json={"actual_delay_minutes": 5},
+        )
+        assert resp.status_code == 400
+        assert resp.json()["error"]["code"] == "INVALID_REQUEST"
+        assert "expired" in resp.json()["error"]["message"].lower()
 
 
 class TestValidationErrors:

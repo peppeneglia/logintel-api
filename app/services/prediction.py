@@ -18,8 +18,10 @@ import logging
 from datetime import datetime
 
 from app.config import get_settings
+from app.engine.calibration import CalibrationInput, compute_historical_accuracy
 from app.engine.confidence import compute_confidence
 from app.engine.heuristics import (
+    WEATHER_IMPACT,
     calculate_segment_delay,
     get_altitude_factor,
     get_road_factor,
@@ -41,6 +43,7 @@ from app.models.schemas import (
 from app.services.elevation import DEFAULT_ELEVATION_M, get_elevations
 from app.services.ors import get_road_type_at_fraction, get_route
 from app.services.weather import get_weather_at_points
+from app.stores import calibration_store, prediction_store
 
 logger = logging.getLogger(__name__)
 
@@ -130,6 +133,9 @@ async def build_prediction(
         if conditions or not elevation_failed:
             successful_points += 1
 
+        # Get dynamic calibration factor from dominant condition
+        cal_factor = _get_segment_calibration_factor(conditions)
+
         # Calculate delay
         delay = calculate_segment_delay(
             weather_conditions=conditions,
@@ -137,6 +143,7 @@ async def build_prediction(
             road_type=road_type,
             altitude_m=altitude,
             arrival_time=est_arrival,
+            calibration_factor=cal_factor,
         )
         total_delay += delay
 
@@ -146,7 +153,7 @@ async def build_prediction(
             altitude_m=altitude,
             altitude_factor=get_altitude_factor(altitude),
             time_factor=get_time_factor(est_arrival),
-            calibration_factor=1.0,
+            calibration_factor=cal_factor,
         )
 
         segments.append(
@@ -164,11 +171,13 @@ async def build_prediction(
 
     # --- Step 6: Confidence ---
     total_points = len(segment_lengths)
+    historical_accuracy = _compute_real_historical_accuracy()
     confidence = compute_confidence(
         departure=departure_time,
         weather_values=weather_values if weather_values else [0.0],
         total_points=total_points,
         successful_points=successful_points,
+        historical_accuracy=historical_accuracy,
     )
 
     # --- Step 7: Assemble response ---
@@ -180,3 +189,44 @@ async def build_prediction(
         confidence=confidence,
         segments=segments,
     )
+
+
+def _get_segment_calibration_factor(conditions: list[WeatherCondition]) -> float:
+    """
+    Get the calibration factor for a segment based on its dominant weather condition.
+
+    The dominant condition is the one with the highest base_impact.
+    Returns 1.0 if no conditions or no calibration data.
+    """
+    if not conditions:
+        return 1.0
+
+    best_impact = 0.0
+    best_key = None
+
+    for c in conditions:
+        impact = WEATHER_IMPACT.get(c.type, {}).get(c.severity, 0.0)
+        if impact > best_impact:
+            best_impact = impact
+            best_key = (c.type, c.severity)
+
+    if best_key is None:
+        return 1.0
+
+    return calibration_store.get_coefficient(best_key[0], best_key[1])
+
+
+def _compute_real_historical_accuracy() -> float:
+    """
+    Compute historical accuracy from real feedback data.
+
+    Returns default 70.0 if insufficient feedback.
+    """
+    all_fb = prediction_store.all_feedback()
+    inputs: list[CalibrationInput] = []
+    for fb in all_fb:
+        pred = prediction_store.get_prediction(fb.prediction_id)
+        if pred is not None:
+            inputs.append(CalibrationInput(prediction=pred, feedback=fb))
+
+    return compute_historical_accuracy(inputs)

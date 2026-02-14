@@ -160,6 +160,27 @@ class FeedbackResponse(BaseModel):
     received_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
 
+# --- Analytics models ---
+
+class WeatherTypeBreakdown(BaseModel):
+    weather_type: WeatherType
+    count: int
+    mae: float = Field(..., description="Mean absolute error in minutes")
+    within_10min_pct: float = Field(..., ge=0, le=100)
+    within_20min_pct: float = Field(..., ge=0, le=100)
+
+
+class AnalyticsResponse(BaseModel):
+    total_predictions: int
+    total_feedback: int
+    feedback_rate: float = Field(..., ge=0, le=100, description="Feedback rate as percentage")
+    mae: float = Field(..., description="Overall mean absolute error in minutes")
+    within_10min_pct: float = Field(..., ge=0, le=100)
+    within_20min_pct: float = Field(..., ge=0, le=100)
+    calibration_version: int
+    breakdown_by_weather: list[WeatherTypeBreakdown]
+
+
 # --- Error models ---
 
 class ErrorDetail(BaseModel):

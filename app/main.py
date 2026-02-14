@@ -4,6 +4,7 @@ from fastapi import FastAPI
 
 from app.config import get_settings
 from app.errors import register_error_handlers
+from app.routes.analytics import router as analytics_router
 from app.routes.health import router as health_router
 from app.routes.predictions import router as predictions_router
 from app.services.cache import close_redis, init_redis
@@ -32,3 +33,4 @@ register_error_handlers(app)
 
 app.include_router(health_router)
 app.include_router(predictions_router)
+app.include_router(analytics_router)
