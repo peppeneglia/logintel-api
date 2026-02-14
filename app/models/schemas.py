@@ -5,7 +5,7 @@ from datetime import datetime, timezone
 from enum import Enum
 from typing import Optional
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 
 # --- Enums ---
@@ -48,6 +48,10 @@ class ConfidenceLevel(str, Enum):
 # --- Coordinate ---
 
 class Coordinate(BaseModel):
+    model_config = ConfigDict(json_schema_extra={
+        "examples": [{"lat": 45.4642, "lon": 9.1900}],
+    })
+
     lat: float = Field(..., ge=-90, le=90, description="Latitude")
     lon: float = Field(..., ge=-180, le=180, description="Longitude")
 
@@ -55,6 +59,17 @@ class Coordinate(BaseModel):
 # --- Request models ---
 
 class PredictionRequest(BaseModel):
+    model_config = ConfigDict(json_schema_extra={
+        "examples": [
+            {
+                "origin": {"lat": 45.4642, "lon": 9.1900},
+                "destination": {"lat": 41.9028, "lon": 12.4964},
+                "departure_time": "2026-02-15T08:00:00+01:00",
+                "include_alternatives": False,
+            }
+        ],
+    })
+
     origin: Coordinate
     destination: Coordinate
     departure_time: datetime = Field(
@@ -73,6 +88,15 @@ class PredictionRequest(BaseModel):
 
 
 class FeedbackRequest(BaseModel):
+    model_config = ConfigDict(json_schema_extra={
+        "examples": [
+            {
+                "actual_delay_minutes": 35,
+                "notes": "Heavy rain near Florence caused slowdown",
+            }
+        ],
+    })
+
     actual_delay_minutes: int = Field(
         ..., ge=-60, le=1440,
         description="Actual delay in minutes (-60 to 1440)"
@@ -157,6 +181,58 @@ class AlternativeRoute(BaseModel):
 # --- Response models ---
 
 class PredictionResponse(BaseModel):
+    model_config = ConfigDict(json_schema_extra={
+        "examples": [
+            {
+                "id": "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
+                "status": "completed",
+                "origin": {"lat": 45.4642, "lon": 9.1900},
+                "destination": {"lat": 41.9028, "lon": 12.4964},
+                "departure_time": "2026-02-15T08:00:00+01:00",
+                "total_delay_minutes": 28.5,
+                "confidence": {
+                    "overall": 82.3,
+                    "level": "good",
+                    "components": {
+                        "time_horizon": 95.0,
+                        "weather_stability": 72.0,
+                        "historical_accuracy": 70.0,
+                        "data_completeness": 100.0,
+                    },
+                },
+                "segments": [
+                    {
+                        "index": 0,
+                        "start_point": {"lat": 45.4642, "lon": 9.1900},
+                        "end_point": {"lat": 45.0, "lon": 9.8},
+                        "length_km": 50.0,
+                        "estimated_arrival": "2026-02-15T08:40:00+01:00",
+                        "weather": [
+                            {
+                                "type": "rain",
+                                "severity": "moderate",
+                                "raw_value": 4.5,
+                                "description": "Moderate rain (4.5 mm/h)",
+                            }
+                        ],
+                        "factors": {
+                            "road_type": "highway",
+                            "road_factor": 0.8,
+                            "altitude_m": 120.0,
+                            "altitude_factor": 1.0,
+                            "time_factor": 1.0,
+                            "calibration_factor": 1.0,
+                            "special_elements": [],
+                        },
+                        "delay_minutes": 3.2,
+                    }
+                ],
+                "alternatives": [],
+                "created_at": "2026-02-15T07:00:00Z",
+            }
+        ],
+    })
+
     id: str = Field(default_factory=lambda: str(uuid.uuid4()))
     status: str = "completed"
     origin: Coordinate
@@ -187,6 +263,18 @@ class PredictionListResponse(BaseModel):
 
 
 class FeedbackResponse(BaseModel):
+    model_config = ConfigDict(json_schema_extra={
+        "examples": [
+            {
+                "prediction_id": "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
+                "actual_delay_minutes": 35,
+                "predicted_delay_minutes": 28.5,
+                "deviation_minutes": 6.5,
+                "received_at": "2026-02-15T18:30:00Z",
+            }
+        ],
+    })
+
     prediction_id: str
     actual_delay_minutes: int
     predicted_delay_minutes: float
@@ -205,6 +293,36 @@ class WeatherTypeBreakdown(BaseModel):
 
 
 class AnalyticsResponse(BaseModel):
+    model_config = ConfigDict(json_schema_extra={
+        "examples": [
+            {
+                "total_predictions": 150,
+                "total_feedback": 42,
+                "feedback_rate": 28.0,
+                "mae": 8.3,
+                "within_10min_pct": 71.4,
+                "within_20min_pct": 90.5,
+                "calibration_version": 3,
+                "breakdown_by_weather": [
+                    {
+                        "weather_type": "rain",
+                        "count": 18,
+                        "mae": 6.2,
+                        "within_10min_pct": 77.8,
+                        "within_20min_pct": 94.4,
+                    },
+                    {
+                        "weather_type": "snow",
+                        "count": 10,
+                        "mae": 14.1,
+                        "within_10min_pct": 50.0,
+                        "within_20min_pct": 80.0,
+                    },
+                ],
+            }
+        ],
+    })
+
     total_predictions: int
     total_feedback: int
     feedback_rate: float = Field(..., ge=0, le=100, description="Feedback rate as percentage")
@@ -227,6 +345,18 @@ class ErrorResponse(BaseModel):
 
 
 class ErrorBody(BaseModel):
+    model_config = ConfigDict(json_schema_extra={
+        "examples": [
+            {
+                "code": "INVALID_REQUEST",
+                "message": "departure_time must include timezone info",
+                "details": [
+                    {"field": "departure_time", "message": "Value error, departure_time must include timezone info"}
+                ],
+            }
+        ],
+    })
+
     code: str
     message: str
     details: list[ErrorDetail] = Field(default_factory=list)

@@ -31,9 +31,53 @@ async def lifespan(application: FastAPI):
 
 app = FastAPI(
     title="Logintel API",
-    description="Predictive route intelligence for logistics",
+    description=(
+        "## Weather-Aware Delay Prediction for Road Freight\n\n"
+        "Logintel API predicts weather-related delays for road freight transport "
+        "along specific routes and suggests alternatives when delays exceed a threshold.\n\n"
+        "### Key features\n"
+        "- **Delay prediction** — per-segment breakdown with confidence score\n"
+        "- **Alternative routes** — suggested when predicted delay > 20 min\n"
+        "- **Feedback loop** — submit actual delays to improve future predictions\n"
+        "- **Accuracy analytics** — MAE, within-10/20 min rates, breakdown by weather type\n\n"
+        "### How it works\n"
+        "1. Calculate route via OpenRouteService\n"
+        "2. Sample weather forecast at points every 50 km along the route\n"
+        "3. Apply smart heuristics (road type, altitude, time of day, calibration)\n"
+        "4. Return total delay, per-segment details, and confidence score\n\n"
+        "### Authentication\n"
+        "All endpoints (except `/v1/health`) require authentication via:\n"
+        "- **Bearer token** — `Authorization: Bearer <JWT>`\n"
+        "- **API key** — `X-API-Key: <key>`\n"
+    ),
     version="0.1.0",
     lifespan=lifespan,
+    openapi_tags=[
+        {
+            "name": "predictions",
+            "description": "Create, retrieve, and list delay predictions. Submit feedback on actual delays.",
+        },
+        {
+            "name": "analytics",
+            "description": "Accuracy metrics and calibration status computed from user feedback.",
+        },
+        {
+            "name": "health",
+            "description": "Service health check with dependency status, metrics, and active alerts.",
+        },
+    ],
+    contact={
+        "name": "Logintel Support",
+        "email": "support@logintel.io",
+        "url": "https://logintel.io",
+    },
+    license_info={
+        "name": "Proprietary",
+    },
+    servers=[
+        {"url": "https://api.logintel.io", "description": "Production"},
+        {"url": "https://sandbox.logintel.io", "description": "Sandbox (coming soon)"},
+    ],
 )
 
 register_error_handlers(app)

@@ -14,6 +14,7 @@ import app.stores as stores
 from app.auth import OrgContext, get_current_org
 from app.models.schemas import (
     AnalyticsResponse,
+    ErrorResponse,
     WeatherType,
     WeatherTypeBreakdown,
 )
@@ -21,11 +22,28 @@ from app.models.schemas import (
 router = APIRouter(prefix="/v1/analytics", tags=["analytics"])
 
 
-@router.get("/accuracy", response_model=AnalyticsResponse)
+@router.get(
+    "/accuracy",
+    response_model=AnalyticsResponse,
+    summary="Get accuracy metrics",
+    responses={
+        401: {"model": ErrorResponse, "description": "Missing or invalid authentication credentials."},
+    },
+)
 async def get_accuracy(
     org: OrgContext = Depends(get_current_org),
 ) -> AnalyticsResponse:
-    """Return accuracy metrics computed from stored feedback."""
+    """Return accuracy metrics computed from stored prediction feedback.
+
+    Metrics include:
+    - **MAE** — Mean Absolute Error between predicted and actual delays (minutes).
+    - **within_10min_pct / within_20min_pct** — percentage of predictions within 10/20 min of actual.
+    - **feedback_rate** — percentage of predictions that received feedback.
+    - **calibration_version** — current calibration coefficient version.
+    - **breakdown_by_weather** — per-weather-type accuracy (rain, snow, wind, fog).
+
+    Metrics are computed from all feedback entries for the authenticated organization.
+    """
     total_predictions = await stores.prediction_store.prediction_count(org_id=org.org_id)
     total_feedback = await stores.prediction_store.feedback_count(org_id=org.org_id)
 

@@ -31,8 +31,18 @@ async def _check_redis() -> dict:
         return {"status": "unhealthy", "reason": str(exc)}
 
 
-@router.get("/v1/health")
+@router.get("/v1/health", summary="Service health check")
 async def health_check():
+    """Return service health status, dependency states, and operational metrics.
+
+    **No authentication required.**
+
+    Response fields:
+    - **status** — `healthy` or `degraded` (degraded if Redis is down or any circuit breaker is open).
+    - **dependencies** — health of Redis and circuit breaker state for each upstream service.
+    - **metrics** — uptime, total requests, error rate, p95 latency, cache hit rate.
+    - **alerts** — list of active alerts (critical/warning) triggered by operational thresholds.
+    """
     settings = get_settings()
 
     redis_status = await _check_redis()

@@ -821,3 +821,105 @@ tests/
   test_circuit_breaker.py ← NUOVO: 15 test
   test_alerting.py        ← NUOVO: 10 test
 ```
+
+---
+
+## Blocco 9: Documentazione Client (2026-02-14)
+
+### Obiettivo
+Documentazione rivolta ai clienti: OpenAPI arricchito con esempi, guide pratiche, esempi di integrazione in 4 linguaggi, FAQ e troubleshooting (FRD Sezione 10).
+
+### Cosa è stato implementato
+
+#### 1. Esempi nei modelli Pydantic (`app/models/schemas.py`)
+- `ConfigDict(json_schema_extra={"examples": [...]})` aggiunto a 7 modelli chiave:
+  - `Coordinate` — Milano (45.4642, 9.1900)
+  - `PredictionRequest` — Milano→Roma con departure_time e include_alternatives
+  - `PredictionResponse` — esempio completo con segmento, confidence, factors
+  - `FeedbackRequest` — 35 min actual delay con note
+  - `FeedbackResponse` — con deviation calcolata
+  - `AnalyticsResponse` — con breakdown per weather type (rain, snow)
+  - `ErrorBody` — errore INVALID_REQUEST con details
+- Import `ConfigDict` aggiunto
+
+#### 2. OpenAPI metadata arricchito (`app/main.py`)
+- **Descrizione markdown estesa** con overview, features, funzionamento e autenticazione
+- **`openapi_tags`** con descrizioni per "predictions", "analytics", "health"
+- **`contact`** — Logintel Support, email, URL
+- **`license_info`** — Proprietary
+- **`servers`** — Production + Sandbox placeholder
+
+#### 3. Endpoint predictions arricchiti (`app/routes/predictions.py`)
+- Ogni endpoint ha:
+  - `summary` breve per sidebar Swagger UI
+  - Docstring multi-riga con spiegazione dettagliata, validazioni e comportamento
+  - `responses={}` con codici errore documentati (400, 401, 404, 429, 502) e `ErrorResponse` model
+- Import `ErrorResponse` aggiunto
+
+#### 4. Endpoint analytics arricchito (`app/routes/analytics.py`)
+- Docstring con spiegazione di ogni metrica (MAE, percentuali, feedback rate, breakdown)
+- `summary` e `responses={401}` con `ErrorResponse` model
+- Import `ErrorResponse` aggiunto
+
+#### 5. Endpoint health arricchito (`app/routes/health.py`)
+- `summary` per Swagger UI
+- Docstring con spiegazione di status, dependencies, metrics, alerts
+
+#### 6. Quick Start Guide (`docs/QUICKSTART.md`)
+- Cos'è Logintel API
+- Autenticazione (JWT Bearer + API Key con esempi header)
+- Prima predizione (cURL Milano→Roma + response annotata)
+- Tabella spiegazione campi (total_delay, confidence, segments, alternatives)
+- Invio feedback (cURL + spiegazione deviation e finestra 7gg)
+- Rotte alternative (quando si attivano, campi disponibili)
+- Gestione errori (formato JSON, tabella codici, retry strategy per 429)
+- Rate limits (tabella per tier)
+- Prossimi passi (link a Swagger, esempi, FAQ)
+
+#### 7. Esempi di integrazione (`docs/examples/`)
+4 file, ognuno con la sequenza completa: auth → create prediction → get prediction → submit feedback → check analytics:
+- **`python_example.py`** — httpx async con `AsyncClient`
+- **`javascript_example.js`** — fetch nativo (Node.js 18+)
+- **`curl_examples.sh`** — tutti gli endpoint con commenti, incluso Bearer auth
+- **`php_example.php`** — cURL PHP con helper `apiRequest()`
+
+#### 8. FAQ e Troubleshooting (`docs/FAQ.md`)
+6 sezioni con 20+ domande:
+- **Generali** — cos'è, accuratezza, copertura, orizzonte 72h
+- **Autenticazione** — come ottenere API key, JWT vs API Key, errore 401
+- **Utilizzo API** — rate limit, errore 429 con retry, formato date ISO 8601, coordinate
+- **Predizioni** — calcolo delay (6 step), segmenti, confidence levels (tabella), alternative
+- **Feedback** — perché importante, finestra 7gg, feedback duplicato, range valori
+- **Troubleshooting** — 502, timeout, prima richiesta lenta, health degraded
+
+### Test
+206 test esistenti, tutti passano. Nessun test nuovo — il blocco è solo documentazione.
+
+### Verifica
+- Schema OpenAPI valido con esempi nei modelli
+- Swagger UI (`/docs`) mostra tag descriptions, esempi, error responses
+- Tutti i file docs coerenti con l'API implementata
+
+### File modificati
+```
+app/
+  main.py              ← OpenAPI metadata arricchito (tags, contact, license, servers, description)
+  models/
+    schemas.py         ← ConfigDict + json_schema_extra examples su 7 modelli
+  routes/
+    predictions.py     ← summary, docstring estese, responses con ErrorResponse
+    analytics.py       ← summary, docstring estesa, responses con ErrorResponse
+    health.py          ← summary, docstring estesa
+```
+
+### File creati
+```
+docs/
+  QUICKSTART.md              ← Guida rapida per clienti
+  FAQ.md                     ← FAQ e troubleshooting (20+ domande)
+  examples/
+    python_example.py        ← Esempio Python (httpx async)
+    javascript_example.js    ← Esempio JavaScript (fetch)
+    curl_examples.sh         ← Esempi cURL per tutti gli endpoint
+    php_example.php          ← Esempio PHP (cURL)
+```

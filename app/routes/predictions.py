@@ -18,6 +18,7 @@ import app.stores as stores
 from app.auth import OrgContext, get_current_org
 from app.errors import InvalidRequestError, NotFoundError
 from app.models.schemas import (
+    ErrorResponse,
     FeedbackRequest,
     FeedbackResponse,
     PredictionListResponse,
@@ -36,12 +37,32 @@ router = APIRouter(prefix="/v1/predictions", tags=["predictions"])
 FEEDBACK_WINDOW_DAYS = 7
 
 
-@router.post("", response_model=PredictionResponse, status_code=201)
+@router.post(
+    "",
+    response_model=PredictionResponse,
+    status_code=201,
+    summary="Create a prediction",
+    responses={
+        400: {"model": ErrorResponse, "description": "Invalid request — missing fields, invalid coordinates, or departure_time without timezone."},
+        401: {"model": ErrorResponse, "description": "Missing or invalid authentication credentials."},
+        429: {"model": ErrorResponse, "description": "Rate limit exceeded. Check the `Retry-After` header."},
+        502: {"model": ErrorResponse, "description": "Upstream service (routing/weather) unavailable. Retry later."},
+    },
+)
 async def create_prediction(
     request: PredictionRequest,
     org: OrgContext = Depends(get_current_org),
 ) -> PredictionResponse:
-    """Create a new delay prediction for a route."""
+    """Create a new weather-aware delay prediction for a route.
+
+    Calculates a route between origin and destination, samples weather forecasts
+    at points every 50 km, and applies heuristics to estimate per-segment delays.
+
+    Set `include_alternatives` to `true` to receive up to 2 alternative routes
+    when the predicted delay on the main route exceeds the threshold (20 min).
+
+    The prediction is persisted and can be retrieved later by its `id`.
+    """
     rate_limiter.check(org)
 
     prediction = await build_prediction(
@@ -55,25 +76,48 @@ async def create_prediction(
     return prediction
 
 
-@router.get("/{prediction_id}", response_model=PredictionResponse)
+@router.get(
+    "/{prediction_id}",
+    response_model=PredictionResponse,
+    summary="Get a prediction",
+    responses={
+        401: {"model": ErrorResponse, "description": "Missing or invalid authentication credentials."},
+        404: {"model": ErrorResponse, "description": "Prediction not found."},
+    },
+)
 async def get_prediction(
     prediction_id: str,
     org: OrgContext = Depends(get_current_org),
 ) -> PredictionResponse:
-    """Retrieve a prediction by ID."""
+    """Retrieve a previously created prediction by its ID.
+
+    Returns the full prediction including segments, confidence score,
+    and alternative routes (if they were requested at creation time).
+    """
     prediction = await stores.prediction_store.get_prediction(prediction_id, org_id=org.org_id)
     if prediction is None:
         raise NotFoundError(f"Prediction {prediction_id} not found")
     return prediction
 
 
-@router.get("", response_model=PredictionListResponse)
+@router.get(
+    "",
+    response_model=PredictionListResponse,
+    summary="List predictions",
+    responses={
+        401: {"model": ErrorResponse, "description": "Missing or invalid authentication credentials."},
+    },
+)
 async def list_predictions(
     page: int = Query(default=1, ge=1),
     per_page: int = Query(default=20, ge=1, le=100),
     org: OrgContext = Depends(get_current_org),
 ) -> PredictionListResponse:
-    """List predictions with pagination."""
+    """List predictions for the authenticated organization with pagination.
+
+    Returns a summary for each prediction (no per-segment details).
+    Use `GET /v1/predictions/{id}` to retrieve full details for a specific prediction.
+    """
     all_predictions = await stores.prediction_store.list_predictions(org_id=org.org_id)
 
     total = len(all_predictions)
@@ -99,13 +143,31 @@ async def list_predictions(
     )
 
 
-@router.post("/{prediction_id}/feedback", response_model=FeedbackResponse, status_code=201)
+@router.post(
+    "/{prediction_id}/feedback",
+    response_model=FeedbackResponse,
+    status_code=201,
+    summary="Submit feedback",
+    responses={
+        400: {"model": ErrorResponse, "description": "Invalid request — feedback already submitted, feedback window expired (> 7 days), or invalid delay value."},
+        401: {"model": ErrorResponse, "description": "Missing or invalid authentication credentials."},
+        404: {"model": ErrorResponse, "description": "Prediction not found."},
+        429: {"model": ErrorResponse, "description": "Rate limit exceeded. Check the `Retry-After` header."},
+    },
+)
 async def submit_feedback(
     prediction_id: str,
     request: FeedbackRequest,
     org: OrgContext = Depends(get_current_org),
 ) -> FeedbackResponse:
-    """Submit actual delay feedback for a prediction."""
+    """Submit the actual delay observed for a prediction.
+
+    Only one feedback entry is allowed per prediction. The feedback window
+    is 7 days from the prediction's departure time.
+
+    Feedback is used to calibrate prediction coefficients and improve accuracy.
+    The response includes the deviation between predicted and actual delay.
+    """
     rate_limiter.check(org)
 
     prediction = await stores.prediction_store.get_prediction(prediction_id, org_id=org.org_id)
