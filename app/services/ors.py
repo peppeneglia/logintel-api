@@ -114,7 +114,7 @@ def _parse_road_types(
     ORS returns waytypes as [[start_idx, end_idx, way_type_code], ...].
     We convert index-based ranges to distance-percentage ranges.
     """
-    waytypes = extra_info.get("waytypes", {}).get("values", [])
+    waytypes = extra_info.get("waytype", extra_info.get("waytypes", {})).get("values", [])
     if not waytypes:
         return [(0.0, 1.0, RoadType.HIGHWAY)]
 
@@ -198,7 +198,7 @@ async def get_route(origin: Coordinate, destination: Coordinate) -> RouteResult:
             [origin.lon, origin.lat],
             [destination.lon, destination.lat],
         ],
-        "extra_info": ["waytypes"],
+        "extra_info": ["waytype"],
         "instructions": False,
         "geometry": True,
     }
