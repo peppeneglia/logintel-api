@@ -9,6 +9,8 @@ from app.routes.health import router as health_router
 from app.routes.predictions import router as predictions_router
 from app.services.cache import close_redis, init_redis
 from app.services.http_client import close_client, init_client
+from app.services.supabase import init_supabase
+from app.stores import init_stores
 
 
 @asynccontextmanager
@@ -17,6 +19,8 @@ async def lifespan(application: FastAPI):
     init_client()
     settings = get_settings()
     init_redis(settings.upstash_redis_url)
+    init_supabase()
+    init_stores()
     yield
     await close_redis()
     await close_client()

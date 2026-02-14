@@ -2,14 +2,14 @@
 Prediction orchestrator — FRD Section 6.
 
 Coordinates the full prediction pipeline:
-  1. ORS → route polyline + duration
-  2. Sampler → sample points every 50km + arrival times
-  3. Elevation → altitude at each point (batch)
-  4. Weather → conditions at each point for its arrival time
-  5. Heuristics → delay per segment
-  6. Confidence → overall score
+  1. ORS -> route polyline + duration
+  2. Sampler -> sample points every 50km + arrival times
+  3. Elevation -> altitude at each point (batch)
+  4. Weather -> conditions at each point for its arrival time
+  5. Heuristics -> delay per segment
+  6. Confidence -> overall score
 
-Handles partial failures: elevation fallback → 200m, weather fallback → clear sky.
+Handles partial failures: elevation fallback -> 200m, weather fallback -> clear sky.
 """
 
 from __future__ import annotations
@@ -17,6 +17,7 @@ from __future__ import annotations
 import logging
 from datetime import datetime
 
+import app.stores as stores
 from app.config import get_settings
 from app.engine.calibration import CalibrationInput, compute_historical_accuracy
 from app.engine.confidence import compute_confidence
@@ -43,7 +44,6 @@ from app.models.schemas import (
 from app.services.elevation import DEFAULT_ELEVATION_M, get_elevations
 from app.services.ors import get_road_type_at_fraction, get_route
 from app.services.weather import get_weather_at_points
-from app.stores import calibration_store, prediction_store
 
 logger = logging.getLogger(__name__)
 
@@ -134,7 +134,7 @@ async def build_prediction(
             successful_points += 1
 
         # Get dynamic calibration factor from dominant condition
-        cal_factor = _get_segment_calibration_factor(conditions)
+        cal_factor = await _get_segment_calibration_factor(conditions)
 
         # Calculate delay
         delay = calculate_segment_delay(
@@ -171,7 +171,7 @@ async def build_prediction(
 
     # --- Step 6: Confidence ---
     total_points = len(segment_lengths)
-    historical_accuracy = _compute_real_historical_accuracy()
+    historical_accuracy = await _compute_real_historical_accuracy()
     confidence = compute_confidence(
         departure=departure_time,
         weather_values=weather_values if weather_values else [0.0],
@@ -191,7 +191,7 @@ async def build_prediction(
     )
 
 
-def _get_segment_calibration_factor(conditions: list[WeatherCondition]) -> float:
+async def _get_segment_calibration_factor(conditions: list[WeatherCondition]) -> float:
     """
     Get the calibration factor for a segment based on its dominant weather condition.
 
@@ -213,19 +213,19 @@ def _get_segment_calibration_factor(conditions: list[WeatherCondition]) -> float
     if best_key is None:
         return 1.0
 
-    return calibration_store.get_coefficient(best_key[0], best_key[1])
+    return await stores.calibration_store.get_coefficient(best_key[0], best_key[1])
 
 
-def _compute_real_historical_accuracy() -> float:
+async def _compute_real_historical_accuracy() -> float:
     """
     Compute historical accuracy from real feedback data.
 
     Returns default 70.0 if insufficient feedback.
     """
-    all_fb = prediction_store.all_feedback()
+    all_fb = await stores.prediction_store.all_feedback()
     inputs: list[CalibrationInput] = []
     for fb in all_fb:
-        pred = prediction_store.get_prediction(fb.prediction_id)
+        pred = await stores.prediction_store.get_prediction(fb.prediction_id)
         if pred is not None:
             inputs.append(CalibrationInput(prediction=pred, feedback=fb))
 

@@ -8,29 +8,32 @@ from __future__ import annotations
 
 from collections import defaultdict
 
-from fastapi import APIRouter
+from fastapi import APIRouter, Depends
 
+import app.stores as stores
+from app.auth import OrgContext, get_current_org
 from app.models.schemas import (
     AnalyticsResponse,
     WeatherType,
     WeatherTypeBreakdown,
 )
-from app.stores import calibration_store, prediction_store
 
 router = APIRouter(prefix="/v1/analytics", tags=["analytics"])
 
 
 @router.get("/accuracy", response_model=AnalyticsResponse)
-async def get_accuracy() -> AnalyticsResponse:
+async def get_accuracy(
+    org: OrgContext = Depends(get_current_org),
+) -> AnalyticsResponse:
     """Return accuracy metrics computed from stored feedback."""
-    total_predictions = prediction_store.prediction_count()
-    total_feedback = prediction_store.feedback_count()
+    total_predictions = await stores.prediction_store.prediction_count(org_id=org.org_id)
+    total_feedback = await stores.prediction_store.feedback_count(org_id=org.org_id)
 
     feedback_rate = 0.0
     if total_predictions > 0:
         feedback_rate = round((total_feedback / total_predictions) * 100.0, 1)
 
-    all_fb = prediction_store.all_feedback()
+    all_fb = await stores.prediction_store.all_feedback(org_id=org.org_id)
 
     # Compute overall metrics
     deviations: list[float] = []
@@ -38,7 +41,7 @@ async def get_accuracy() -> AnalyticsResponse:
     weather_buckets: dict[WeatherType, list[float]] = defaultdict(list)
 
     for fb in all_fb:
-        pred = prediction_store.get_prediction(fb.prediction_id)
+        pred = await stores.prediction_store.get_prediction(fb.prediction_id, org_id=org.org_id)
         if pred is None:
             continue
 
@@ -85,7 +88,7 @@ async def get_accuracy() -> AnalyticsResponse:
         mae=mae,
         within_10min_pct=within_10,
         within_20min_pct=within_20,
-        calibration_version=calibration_store.get_current_version(),
+        calibration_version=await stores.calibration_store.get_current_version(org_id=org.org_id),
         breakdown_by_weather=breakdown,
     )
 

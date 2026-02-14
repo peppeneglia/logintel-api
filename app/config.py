@@ -15,6 +15,7 @@ class Settings(BaseSettings):
     ors_base_url: str = "https://api.openrouteservice.org"
     open_meteo_base_url: str = "https://api.open-meteo.com"
     open_elevation_base_url: str = "https://api.open-elevation.com"
+    supabase_jwt_secret: str = ""
     sampling_interval_km: int = 50
     max_forecast_hours: int = 72
     cache_ttl_route: int = 86400

@@ -7,6 +7,7 @@ from datetime import datetime, timezone
 import pytest
 from fastapi.testclient import TestClient
 
+import app.stores as stores
 from app.main import app
 from app.models.schemas import (
     ConfidenceComponents,
@@ -22,19 +23,8 @@ from app.models.schemas import (
     WeatherCondition,
     WeatherType,
 )
-from app.stores import calibration_store, prediction_store
 
 client = TestClient(app)
-
-
-@pytest.fixture(autouse=True)
-def _clear_stores():
-    """Clear all stores before each test."""
-    prediction_store.clear_all()
-    calibration_store.clear_all()
-    yield
-    prediction_store.clear_all()
-    calibration_store.clear_all()
 
 
 def _make_prediction(
@@ -109,14 +99,14 @@ class TestAnalyticsWithFeedback:
         # Create 4 predictions with known delays
         for delay, actual in [(10.0, 15), (20.0, 25), (10.0, 10), (10.0, 35)]:
             pred = _make_prediction(delay=delay)
-            prediction_store.save_prediction(pred)
+            stores.prediction_store.save_prediction_sync(pred)
             fb = FeedbackResponse(
                 prediction_id=pred.id,
                 actual_delay_minutes=actual,
                 predicted_delay_minutes=delay,
                 deviation_minutes=actual - delay,
             )
-            prediction_store.save_feedback(fb)
+            stores.prediction_store.save_feedback_sync(fb)
 
         resp = client.get("/v1/analytics/accuracy")
         assert resp.status_code == 200
@@ -128,18 +118,18 @@ class TestAnalyticsWithFeedback:
         # MAE = mean(|15-10|, |25-20|, |10-10|, |35-10|) = mean(5, 5, 0, 25) = 8.75
         assert data["mae"] == pytest.approx(8.75, abs=0.01)
 
-        # within 10: deviations 5, 5, 0, 25 → 3/4 = 75%
+        # within 10: deviations 5, 5, 0, 25 -> 3/4 = 75%
         assert data["within_10min_pct"] == pytest.approx(75.0, abs=0.1)
 
-        # within 20: deviations 5, 5, 0, 25 → 3/4 = 75%
+        # within 20: deviations 5, 5, 0, 25 -> 3/4 = 75%
         assert data["within_20min_pct"] == pytest.approx(75.0, abs=0.1)
 
     def test_breakdown_by_weather_type(self):
         # Rain predictions
         for _ in range(2):
             pred = _make_prediction(delay=10.0, weather_type=WeatherType.RAIN)
-            prediction_store.save_prediction(pred)
-            prediction_store.save_feedback(FeedbackResponse(
+            stores.prediction_store.save_prediction_sync(pred)
+            stores.prediction_store.save_feedback_sync(FeedbackResponse(
                 prediction_id=pred.id,
                 actual_delay_minutes=15,
                 predicted_delay_minutes=10.0,
@@ -148,8 +138,8 @@ class TestAnalyticsWithFeedback:
 
         # Snow predictions
         pred = _make_prediction(delay=20.0, weather_type=WeatherType.SNOW)
-        prediction_store.save_prediction(pred)
-        prediction_store.save_feedback(FeedbackResponse(
+        stores.prediction_store.save_prediction_sync(pred)
+        stores.prediction_store.save_feedback_sync(FeedbackResponse(
             prediction_id=pred.id,
             actual_delay_minutes=30,
             predicted_delay_minutes=20.0,
@@ -172,9 +162,9 @@ class TestAnalyticsWithFeedback:
         # 3 predictions, 1 with feedback
         for i in range(3):
             pred = _make_prediction(delay=10.0)
-            prediction_store.save_prediction(pred)
+            stores.prediction_store.save_prediction_sync(pred)
             if i == 0:
-                prediction_store.save_feedback(FeedbackResponse(
+                stores.prediction_store.save_feedback_sync(FeedbackResponse(
                     prediction_id=pred.id,
                     actual_delay_minutes=12,
                     predicted_delay_minutes=10.0,

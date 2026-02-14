@@ -12,8 +12,10 @@ from __future__ import annotations
 import logging
 from datetime import datetime, timedelta, timezone
 
-from fastapi import APIRouter, Query
+from fastapi import APIRouter, Depends, Query
 
+import app.stores as stores
+from app.auth import OrgContext, get_current_org
 from app.errors import InvalidRequestError, NotFoundError
 from app.models.schemas import (
     FeedbackRequest,
@@ -23,8 +25,8 @@ from app.models.schemas import (
     PredictionResponse,
     PredictionSummary,
 )
+from app.rate_limit import rate_limiter
 from app.services.prediction import build_prediction
-from app.stores import prediction_store
 
 logger = logging.getLogger(__name__)
 
@@ -35,20 +37,28 @@ FEEDBACK_WINDOW_DAYS = 7
 
 
 @router.post("", response_model=PredictionResponse, status_code=201)
-async def create_prediction(request: PredictionRequest) -> PredictionResponse:
+async def create_prediction(
+    request: PredictionRequest,
+    org: OrgContext = Depends(get_current_org),
+) -> PredictionResponse:
     """Create a new delay prediction for a route."""
+    rate_limiter.check(org)
+
     prediction = await build_prediction(
         request.origin, request.destination, request.departure_time
     )
 
-    prediction_store.save_prediction(prediction)
+    await stores.prediction_store.save_prediction(prediction, org_id=org.org_id)
     return prediction
 
 
 @router.get("/{prediction_id}", response_model=PredictionResponse)
-async def get_prediction(prediction_id: str) -> PredictionResponse:
+async def get_prediction(
+    prediction_id: str,
+    org: OrgContext = Depends(get_current_org),
+) -> PredictionResponse:
     """Retrieve a prediction by ID."""
-    prediction = prediction_store.get_prediction(prediction_id)
+    prediction = await stores.prediction_store.get_prediction(prediction_id, org_id=org.org_id)
     if prediction is None:
         raise NotFoundError(f"Prediction {prediction_id} not found")
     return prediction
@@ -58,9 +68,10 @@ async def get_prediction(prediction_id: str) -> PredictionResponse:
 async def list_predictions(
     page: int = Query(default=1, ge=1),
     per_page: int = Query(default=20, ge=1, le=100),
+    org: OrgContext = Depends(get_current_org),
 ) -> PredictionListResponse:
     """List predictions with pagination."""
-    all_predictions = prediction_store.list_predictions()
+    all_predictions = await stores.prediction_store.list_predictions(org_id=org.org_id)
 
     total = len(all_predictions)
     start = (page - 1) * per_page
@@ -87,14 +98,18 @@ async def list_predictions(
 
 @router.post("/{prediction_id}/feedback", response_model=FeedbackResponse, status_code=201)
 async def submit_feedback(
-    prediction_id: str, request: FeedbackRequest
+    prediction_id: str,
+    request: FeedbackRequest,
+    org: OrgContext = Depends(get_current_org),
 ) -> FeedbackResponse:
     """Submit actual delay feedback for a prediction."""
-    prediction = prediction_store.get_prediction(prediction_id)
+    rate_limiter.check(org)
+
+    prediction = await stores.prediction_store.get_prediction(prediction_id, org_id=org.org_id)
     if prediction is None:
         raise NotFoundError(f"Prediction {prediction_id} not found")
 
-    if prediction_store.get_feedback(prediction_id) is not None:
+    if await stores.prediction_store.get_feedback(prediction_id, org_id=org.org_id) is not None:
         raise InvalidRequestError("Feedback already submitted for this prediction")
 
     # Reject feedback for predictions older than 7 days
@@ -116,15 +131,15 @@ async def submit_feedback(
         deviation_minutes=round(deviation, 2),
     )
 
-    prediction_store.save_feedback(feedback)
+    await stores.prediction_store.save_feedback(feedback, org_id=org.org_id)
 
     # Try to recalibrate after new feedback
-    _try_calibrate()
+    await _try_calibrate(org.org_id)
 
     return feedback
 
 
-def _try_calibrate() -> None:
+async def _try_calibrate(org_id: str = "") -> None:
     """Attempt recalibration if prerequisites are met."""
     from app.engine.calibration import (
         CalibrationInput,
@@ -132,12 +147,11 @@ def _try_calibrate() -> None:
         compute_error_factors,
         compute_new_coefficients,
     )
-    from app.stores import calibration_store
 
     # Build calibration inputs from paired prediction+feedback
     inputs: list[CalibrationInput] = []
-    for fb in prediction_store.all_feedback():
-        pred = prediction_store.get_prediction(fb.prediction_id)
+    for fb in await stores.prediction_store.all_feedback(org_id=org_id):
+        pred = await stores.prediction_store.get_prediction(fb.prediction_id, org_id=org_id)
         if pred is not None:
             inputs.append(CalibrationInput(prediction=pred, feedback=fb))
 
@@ -152,12 +166,12 @@ def _try_calibrate() -> None:
     # Get current coefficients
     current: dict[tuple, float] = {}
     for key in error_factors:
-        current[key] = calibration_store.get_coefficient(key[0], key[1])
+        current[key] = await stores.calibration_store.get_coefficient(key[0], key[1], org_id=org_id)
 
     new_coefficients = compute_new_coefficients(current, error_factors)
-    calibration_store.save_version(new_coefficients, feedback_count=len(inputs))
+    await stores.calibration_store.save_version(new_coefficients, feedback_count=len(inputs), org_id=org_id)
     logger.info(
         "Calibration updated to version %d with %d feedback entries",
-        calibration_store.get_current_version(),
+        await stores.calibration_store.get_current_version(org_id=org_id),
         len(inputs),
     )

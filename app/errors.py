@@ -43,7 +43,8 @@ class NotFoundError(LogintelError):
 
 
 class RateLimitError(LogintelError):
-    def __init__(self, message: str = "Rate limit exceeded"):
+    def __init__(self, message: str = "Rate limit exceeded", retry_after: int = 60):
+        self.retry_after = retry_after
         super().__init__("RATE_LIMIT_EXCEEDED", message, 429)
 
 
@@ -62,7 +63,10 @@ def register_error_handlers(app: FastAPI) -> None:
         body = ErrorResponse(
             error=ErrorBody(code=exc.code, message=exc.message, details=exc.details)
         )
-        return JSONResponse(status_code=exc.status_code, content=body.model_dump())
+        headers: dict[str, str] = {}
+        if exc.status_code == 429 and isinstance(exc, RateLimitError):
+            headers["Retry-After"] = str(exc.retry_after)
+        return JSONResponse(status_code=exc.status_code, content=body.model_dump(), headers=headers)
 
     @app.exception_handler(RequestValidationError)
     async def validation_error_handler(_request: Request, exc: RequestValidationError) -> JSONResponse:

@@ -19,19 +19,8 @@ from app.models.schemas import (
     SegmentDetail,
     SegmentFactors,
 )
-from app.stores import calibration_store, prediction_store
 
 client = TestClient(app)
-
-
-@pytest.fixture(autouse=True)
-def _clear_stores():
-    """Clear all stores before and after each test."""
-    prediction_store.clear_all()
-    calibration_store.clear_all()
-    yield
-    prediction_store.clear_all()
-    calibration_store.clear_all()
 
 
 def _make_stub_prediction(
