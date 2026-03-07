@@ -37,13 +37,13 @@ WEATHER_IMPACT: dict[WeatherType, dict[Severity, float]] = {
         Severity.LIGHT: 0.0,
         Severity.MODERATE: 6.0,
         Severity.HEAVY: 12.0,
-        Severity.VERY_HEAVY: 25.0,
+        Severity.VERY_HEAVY: 30.0,
     },
     WeatherType.FOG: {
         Severity.LIGHT: 8.0,
         Severity.MODERATE: 18.0,
-        Severity.HEAVY: 35.0,
-        Severity.VERY_HEAVY: 35.0,  # dense fog caps at same value
+        Severity.HEAVY: 40.0,
+        Severity.VERY_HEAVY: 40.0,  # dense fog caps at same value
     },
 }
 

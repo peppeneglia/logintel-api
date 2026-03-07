@@ -33,6 +33,7 @@ from app.services.weather import (
     _find_hour_index,
     _weather_cache_key,
     get_weather_at_points,
+    _extract_conditions_at_hour,
 )
 from app.services.elevation import (
     DEFAULT_ELEVATION_M,
@@ -127,7 +128,7 @@ class TestRouteHash:
 
     def test_nearby_coords_same_hash(self):
         o1 = Coordinate(lat=45.464, lon=9.190)
-        o2 = Coordinate(lat=45.463, lon=9.189)  # ~150m away, same grid cell
+        o2 = Coordinate(lat=45.463, lon=9.191)  # ~150m away, same 0.005° grid cell
         d = Coordinate(lat=41.902, lon=12.496)
         h1 = compute_route_hash(o1, d)
         h2 = compute_route_hash(o2, d)
@@ -462,7 +463,7 @@ class TestOrsCacheHit:
 class TestWeatherCacheHit:
     @pytest.mark.asyncio
     async def test_weather_returns_cached_result(self):
-        """When cache has daily weather, Open-Meteo should NOT be called."""
+        """When cache has hourly weather, Open-Meteo should NOT be called."""
         import fakeredis.aioredis
 
         fake = fakeredis.aioredis.FakeRedis(decode_responses=True)
@@ -470,9 +471,9 @@ class TestWeatherCacheHit:
 
         point = Coordinate(lat=45.0, lon=9.0)
         arrival = datetime(2026, 2, 15, 8, 0, tzinfo=timezone.utc)
-        cache_key = _weather_cache_key(point.lat, point.lon, "2026-02-15")
+        cache_key = _weather_cache_key(point.lat, point.lon, "2026-02-15T08:00")
 
-        # Pre-populate cache with a full daily response
+        # Pre-populate cache with a single-hour slice
         cached_hourly = {
             "time": ["2026-02-15T08:00"],
             "precipitation": [5.0],

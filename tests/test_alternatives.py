@@ -77,7 +77,7 @@ OPEN_METEO_RESPONSE = {
     }
 }
 
-# Heavy rain response — generates delay > 20 min threshold
+# Heavy rain response — generates delay > 20 min threshold (single-location format)
 OPEN_METEO_HEAVY_RAIN = {
     "hourly": {
         "time": ["2026-02-15T08:00", "2026-02-15T09:00", "2026-02-15T10:00"],
@@ -95,6 +95,20 @@ ELEVATION_RESPONSE = {
         {"latitude": 43.25, "longitude": -126.45, "elevation": 120.0},
     ]
 }
+
+
+def _meteo_batch_callback(request: httpx.Request, weather_data: dict = OPEN_METEO_HEAVY_RAIN) -> httpx.Response:
+    """Return single-location or multi-location response based on query params."""
+    url = str(request.url)
+    # Count how many coordinates were requested
+    from urllib.parse import urlparse, parse_qs
+    qs = parse_qs(urlparse(url).query)
+    lats = qs.get("latitude", [""])[0].split(",")
+    n = len([l for l in lats if l.strip()])
+    if n <= 1:
+        return httpx.Response(200, json=weather_data)
+    # Multi-location: return array of identical responses
+    return httpx.Response(200, json=[weather_data] * n)
 
 
 # ─── get_routes tests ──────────────────────────────────────────────────
@@ -258,9 +272,9 @@ class TestBuildPredictionAlternatives:
                     200, json={"routes": [ORS_MAIN_ROUTE, ORS_ALT_ROUTE]}
                 )
             )
-            # Heavy rain → delay > 20 min
+            # Heavy rain → delay > 20 min (batch-aware callback)
             respx.get("https://api.open-meteo.com/v1/forecast").mock(
-                return_value=httpx.Response(200, json=OPEN_METEO_HEAVY_RAIN)
+                side_effect=lambda req: _meteo_batch_callback(req, OPEN_METEO_HEAVY_RAIN)
             )
             respx.post("https://api.open-elevation.com/api/v1/lookup").mock(
                 return_value=httpx.Response(200, json=ELEVATION_RESPONSE)

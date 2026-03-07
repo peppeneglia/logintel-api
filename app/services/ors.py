@@ -93,14 +93,14 @@ def compute_route_hash(origin: Coordinate, destination: Coordinate) -> str:
     Compute a stable hash for a route based on rounded coordinates.
 
     Coordinates are rounded to ±0.005° (~500m) so nearby origins/destinations
-    produce the same hash, enabling cache reuse.
+    produce the same hash, enabling cache reuse (FRD §9.3).
     """
     def _round(val: float) -> float:
-        return round(val / 0.01) * 0.01  # round to nearest 0.01° (~1.1km)
+        return round(val / 0.005) * 0.005  # round to nearest 0.005° (~500m)
 
     key = (
-        f"{_round(origin.lat):.2f},{_round(origin.lon):.2f}"
-        f"→{_round(destination.lat):.2f},{_round(destination.lon):.2f}"
+        f"{_round(origin.lat):.3f},{_round(origin.lon):.3f}"
+        f"→{_round(destination.lat):.3f},{_round(destination.lon):.3f}"
     )
     return hashlib.sha256(key.encode()).hexdigest()[:16]
 
