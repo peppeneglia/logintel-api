@@ -11,6 +11,7 @@ Logintel API predicts weather-related delays for road freight transport along sp
 - **Weather data:** Open-Meteo (free, no rate limit)
 - **Routing:** OpenRouteService (2,000 req/day - MAIN CONSTRAINT)
 - **Elevation:** Open-Elevation (free)
+- **Road type detection:** OpenStreetMap Overpass API (free)
 
 ## Critical constraint
 OpenRouteService has a 2,000 req/day free limit. Every routing call must be cached aggressively (TTL 24h). Route alternatives should only be calculated when predicted delay exceeds a threshold. Use route hashing for nearby coordinates.
@@ -39,17 +40,56 @@ OpenRouteService has a 2,000 req/day free limit. Every routing call must be cach
 - Time: night 0.7, rush hour 1.4, weekend 0.85, summer exodus 1.5
 
 ## Project structure
-`
+```
 app/
-  main.py          - FastAPI entry point
-  config.py        - Settings from env vars
-  routes/          - API endpoint handlers
-  services/        - External API integrations (ORS, Open-Meteo, elevation)
-  engine/          - Prediction logic (heuristics, confidence, sampling)
-  models/          - Pydantic request/response schemas
-docs/              - FRD and documentation
-tests/             - Test files
-`
+  main.py              - FastAPI entry point
+  config.py            - Settings from env vars
+  auth.py              - Supabase JWT + API key authentication
+  errors.py            - Centralized error handling and JSON error responses
+  middleware.py         - Request/response middleware
+  rate_limit.py        - Rate limiting logic
+  metrics.py           - Application metrics collection
+  alerting.py          - Alerting system for anomalies/failures
+  circuit_breaker.py   - Circuit breaker for external API resilience
+  logging_config.py    - Structured logging configuration
+  routes/
+    predictions.py     - POST/GET /v1/predictions, feedback
+    analytics.py       - GET /v1/analytics/accuracy
+    health.py          - GET /v1/health
+  services/
+    ors.py             - OpenRouteService routing integration
+    weather.py         - Open-Meteo weather data
+    elevation.py       - Open-Elevation altitude data
+    overpass.py         - OpenStreetMap Overpass for road type detection
+    cache.py           - Redis (Upstash) caching layer
+    http_client.py     - Shared async httpx client
+    prediction.py      - Prediction orchestration service
+    supabase.py        - Supabase client wrapper
+  engine/
+    heuristics.py      - Weather impact & delay calculation
+    confidence.py      - Confidence score computation
+    sampler.py         - Route point sampling (every 50km)
+    calibration.py     - Calibration coefficient management
+    special_elements.py - Road-specific elements (tunnels, passes, etc.)
+  models/
+    schemas.py         - Pydantic request/response schemas
+  stores/
+    prediction_store.py  - Prediction persistence (Supabase)
+    calibration_store.py - Calibration data persistence
+    supabase_store.py    - Base Supabase store
+    memory.py            - In-memory fallback store
+docs/                - FRD and documentation
+tests/               - Test files
+supabase/
+  migrations/
+    001_initial_schema.sql - DB schema: predictions, feedback, calibration_versions
+```
+
+## Database schema (Supabase PostgreSQL)
+- **predictions** — `id` (TEXT PK), `organization_id`, `data` (JSONB), `total_delay_minutes`, `departure_time`, `created_at`
+- **feedback** — `id` (BIGINT auto), `prediction_id` (FK → predictions, UNIQUE), `organization_id`, `actual_delay_minutes`, `predicted_delay_minutes`, `deviation_minutes`, `received_at`
+- **calibration_versions** — `version` (BIGINT auto PK), `coefficients` (JSONB), `feedback_count`, `created_at`
+- RLS enabled on all tables. Migration in `supabase/migrations/001_initial_schema.sql`.
 
 ## API endpoints (v1)
 - POST /v1/predictions - Create a new prediction
