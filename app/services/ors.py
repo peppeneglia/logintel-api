@@ -303,8 +303,32 @@ async def get_routes(
     response = await request_with_retry(
         "POST", url, headers=headers, json=body, service_name="ors",
     )
+
+    # ORS rejects alternative_routes for long routes (>150 km free tier).
+    # Fall back to single-route request so the prediction still succeeds.
+    if response.status_code in (400, 413) or (
+        response.status_code == 200
+        and "error" in (response.headers.get("content-type", ""))
+    ):
+        error_data = response.json()
+        if "error" in error_data:
+            logger.warning(
+                "ORS rejected alternative_routes (code=%s): %s — falling back to single route",
+                error_data["error"].get("code"),
+                error_data["error"].get("message"),
+            )
+            return [await get_route(origin, destination)]
+
     response.raise_for_status()
     data = response.json()
+
+    # ORS may return an error body even with 200 status
+    if "error" in data:
+        logger.warning(
+            "ORS error in alternatives response: %s — falling back to single route",
+            data["error"].get("message"),
+        )
+        return [await get_route(origin, destination)]
 
     results = [_parse_single_route(r) for r in data["routes"]]
 
