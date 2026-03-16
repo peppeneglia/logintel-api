@@ -14,6 +14,7 @@ Handles partial failures: elevation fallback -> 200m, weather fallback -> clear 
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import time
 from datetime import datetime
@@ -101,35 +102,44 @@ async def build_prediction(
     )
     logger.info("[TIMING] sampling: %.3fs (%d points)", time.monotonic() - t0, len(sample_points))
 
-    # --- Step 3: Elevation (batch, with fallback) ---
+    # --- Steps 3/3.5/4: Elevation + Special Elements + Weather (parallel) ---
     t0 = time.monotonic()
-    elevation_failed = False
-    try:
-        elevations = await get_elevations(
-            sample_points, base_url=settings.open_elevation_base_url
-        )
-    except Exception:
-        logger.warning("Elevation service unavailable — using defaults")
-        elevations = [DEFAULT_ELEVATION_M] * len(sample_points)
-        elevation_failed = True
-    logger.info("[TIMING] elevation: %.3fs", time.monotonic() - t0)
 
-    # --- Step 3.5: Special route elements (FRD 6.4) ---
-    t0 = time.monotonic()
-    special_elements: list[SpecialElement] = []
-    if settings.enable_special_elements:
+    async def _fetch_elevation() -> tuple[list[float], bool]:
         try:
-            special_elements = await get_special_elements(route.polyline)
+            elev = await get_elevations(
+                sample_points, base_url=settings.open_elevation_base_url
+            )
+            return elev, False
+        except Exception:
+            logger.warning("Elevation service unavailable — using defaults")
+            return [DEFAULT_ELEVATION_M] * len(sample_points), True
+
+    async def _fetch_special_elements() -> list[SpecialElement]:
+        if not settings.enable_special_elements:
+            return []
+        try:
+            return await get_special_elements(route.polyline)
         except Exception:
             logger.warning("Special elements fetch failed — skipping")
-    logger.info("[TIMING] special_elements: %.3fs", time.monotonic() - t0)
+            return []
 
-    # --- Step 4: Weather (per-point, with fallback) ---
-    t0 = time.monotonic()
-    weather_per_point = await get_weather_at_points(
-        sample_points, arrival_times, base_url=settings.open_meteo_base_url
+    async def _fetch_weather() -> list[list[WeatherCondition]]:
+        return await get_weather_at_points(
+            sample_points, arrival_times, base_url=settings.open_meteo_base_url
+        )
+
+    (elevations, elevation_failed), special_elements, weather_per_point = (
+        await asyncio.gather(
+            _fetch_elevation(),
+            _fetch_special_elements(),
+            _fetch_weather(),
+        )
     )
-    logger.info("[TIMING] weather_batch: %.3fs", time.monotonic() - t0)
+    logger.info(
+        "[TIMING] parallel(elevation+special+weather): %.3fs",
+        time.monotonic() - t0,
+    )
 
     # --- Step 5: Build segments ---
     t0 = time.monotonic()
@@ -278,23 +288,27 @@ async def _compute_route_delay(route: RouteResult, departure_time: datetime) -> 
         sample_points, departure_time, total_duration_seconds=route.duration_s
     )
 
-    try:
-        elevations = await get_elevations(
-            sample_points, base_url=settings.open_elevation_base_url
-        )
-    except Exception:
-        elevations = [DEFAULT_ELEVATION_M] * len(sample_points)
-
-    # Special elements for lightweight pipeline
-    special_elements: list[SpecialElement] = []
-    if settings.enable_special_elements:
+    async def _elev():
         try:
-            special_elements = await get_special_elements(route.polyline)
+            return await get_elevations(sample_points, base_url=settings.open_elevation_base_url)
         except Exception:
-            pass
+            return [DEFAULT_ELEVATION_M] * len(sample_points)
 
-    weather_per_point = await get_weather_at_points(
-        sample_points, arrival_times, base_url=settings.open_meteo_base_url
+    async def _se():
+        if not settings.enable_special_elements:
+            return []
+        try:
+            return await get_special_elements(route.polyline)
+        except Exception:
+            return []
+
+    async def _wx():
+        return await get_weather_at_points(
+            sample_points, arrival_times, base_url=settings.open_meteo_base_url
+        )
+
+    elevations, special_elements, weather_per_point = await asyncio.gather(
+        _elev(), _se(), _wx()
     )
 
     segment_lengths = compute_segment_lengths(sample_points)
