@@ -31,9 +31,9 @@ from app.models.schemas import (
 )
 from app.services.overpass import (
     _build_overpass_query,
-    _compute_route_bbox,
     _osm_cache_key,
     _parse_overpass_response,
+    _sample_polyline,
     get_special_elements,
 )
 
@@ -179,16 +179,45 @@ class TestFindElementsForSegment:
 
 
 class TestOverpassService:
-    def test_bbox_computation(self):
+    def test_sample_polyline_short(self):
+        """Polyline shorter than max_points should be returned as-is."""
         polyline = [
             Coordinate(lat=45.0, lon=7.0),
             Coordinate(lat=46.0, lon=8.0),
         ]
-        s, w, n, e = _compute_route_bbox(polyline, padding_deg=0.05)
-        assert s == pytest.approx(44.95)
-        assert w == pytest.approx(6.95)
-        assert n == pytest.approx(46.05)
-        assert e == pytest.approx(8.05)
+        sampled = _sample_polyline(polyline, max_points=40)
+        assert len(sampled) == 2
+
+    def test_sample_polyline_long(self):
+        """Long polyline should be evenly sampled down."""
+        polyline = [Coordinate(lat=45.0 + i * 0.01, lon=7.0) for i in range(100)]
+        sampled = _sample_polyline(polyline, max_points=10)
+        assert len(sampled) == 10
+        # First and last should be preserved
+        assert sampled[0].lat == polyline[0].lat
+        assert sampled[-1].lat == polyline[-1].lat
+
+    def test_cache_key_stability(self):
+        """Same polyline should always produce the same cache key."""
+        polyline = [
+            Coordinate(lat=45.0, lon=7.0),
+            Coordinate(lat=46.0, lon=8.0),
+        ]
+        k1 = _osm_cache_key(polyline)
+        k2 = _osm_cache_key(polyline)
+        assert k1 == k2
+        assert k1.startswith("osm:corridor:")
+
+    def test_build_query_uses_around(self):
+        """Query should use 'around' filter instead of bbox."""
+        polyline = [
+            Coordinate(lat=45.0, lon=7.0),
+            Coordinate(lat=46.0, lon=8.0),
+        ]
+        query = _build_overpass_query(polyline)
+        assert "around:" in query
+        assert "45.0,7.0" in query
+        assert "46.0,8.0" in query
 
     def test_parse_overpass_response_tunnel_and_bridge(self):
         data = {
@@ -257,10 +286,14 @@ class TestOverpassService:
     @respx.mock
     async def test_get_special_elements_success(self):
         """Should parse Overpass response correctly."""
+        from app.services.overpass import _mem_cache
         from app.services.http_client import init_client
         init_client()
 
         polyline = [Coordinate(lat=45.0, lon=7.0), Coordinate(lat=46.0, lon=8.0)]
+
+        # Clear in-memory cache to force API call
+        _mem_cache.clear()
 
         respx.post("https://overpass-api.de/api/interpreter").mock(
             return_value=httpx.Response(200, json={
@@ -291,6 +324,26 @@ class TestOverpassService:
             result = await get_special_elements(polyline)
             assert len(result) == 1
             assert result[0].type == SpecialElementType.BRIDGE
+
+    @pytest.mark.asyncio
+    async def test_get_special_elements_memory_cache_hit(self):
+        """Should return from in-memory cache when Redis misses."""
+        from app.services.overpass import _mem_cache
+
+        polyline = [Coordinate(lat=45.0, lon=7.0), Coordinate(lat=46.0, lon=8.0)]
+        cache_key = _osm_cache_key(polyline)
+        _mem_cache[cache_key] = [
+            {"type": "tunnel", "name": "Mem Tunnel", "lat": 45.1, "lon": 7.1, "length_m": 2000.0}
+        ]
+
+        with patch("app.services.overpass.cache_get", new_callable=AsyncMock, return_value=None):
+            result = await get_special_elements(polyline)
+            assert len(result) == 1
+            assert result[0].type == SpecialElementType.TUNNEL
+            assert result[0].name == "Mem Tunnel"
+
+        # Cleanup
+        del _mem_cache[cache_key]
 
 
 # ── TestHeuristicsWithSpecialElements ────────────────────────────
