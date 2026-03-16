@@ -15,6 +15,7 @@ Handles partial failures: elevation fallback -> 200m, weather fallback -> clear 
 from __future__ import annotations
 
 import logging
+import time
 from datetime import datetime
 
 import app.stores as stores
@@ -75,12 +76,16 @@ async def build_prediction(
       8. Assemble and return PredictionResponse
     """
     settings = get_settings()
+    t_pipeline = time.monotonic()
 
     # --- Step 1: Route(s) ---
+    t0 = time.monotonic()
     all_routes = await get_routes(origin, destination, include_alternatives)
     route = all_routes[0]
+    logger.info("[TIMING] ors_route: %.3fs", time.monotonic() - t0)
 
     # --- Step 2: Sample points ---
+    t0 = time.monotonic()
     sample_points = sample_points_from_polyline(
         route.polyline, interval_km=float(settings.sampling_interval_km)
     )
@@ -94,8 +99,10 @@ async def build_prediction(
     arrival_times = estimate_arrival_times(
         sample_points, departure_time, total_duration_seconds=route.duration_s
     )
+    logger.info("[TIMING] sampling: %.3fs (%d points)", time.monotonic() - t0, len(sample_points))
 
     # --- Step 3: Elevation (batch, with fallback) ---
+    t0 = time.monotonic()
     elevation_failed = False
     try:
         elevations = await get_elevations(
@@ -105,21 +112,27 @@ async def build_prediction(
         logger.warning("Elevation service unavailable — using defaults")
         elevations = [DEFAULT_ELEVATION_M] * len(sample_points)
         elevation_failed = True
+    logger.info("[TIMING] elevation: %.3fs", time.monotonic() - t0)
 
     # --- Step 3.5: Special route elements (FRD 6.4) ---
+    t0 = time.monotonic()
     special_elements: list[SpecialElement] = []
     if settings.enable_special_elements:
         try:
             special_elements = await get_special_elements(route.polyline)
         except Exception:
             logger.warning("Special elements fetch failed — skipping")
+    logger.info("[TIMING] special_elements: %.3fs", time.monotonic() - t0)
 
     # --- Step 4: Weather (per-point, with fallback) ---
+    t0 = time.monotonic()
     weather_per_point = await get_weather_at_points(
         sample_points, arrival_times, base_url=settings.open_meteo_base_url
     )
+    logger.info("[TIMING] weather_batch: %.3fs", time.monotonic() - t0)
 
     # --- Step 5: Build segments ---
+    t0 = time.monotonic()
     segment_lengths = compute_segment_lengths(sample_points)
     total_distance = route.distance_m / 1000.0  # km
 
@@ -203,7 +216,10 @@ async def build_prediction(
             )
         )
 
+    logger.info("[TIMING] heuristics: %.3fs", time.monotonic() - t0)
+
     # --- Step 6: Confidence ---
+    t0 = time.monotonic()
     total_points = len(segment_lengths)
     historical_accuracy = await _compute_real_historical_accuracy()
     confidence = compute_confidence(
@@ -214,7 +230,10 @@ async def build_prediction(
         historical_accuracy=historical_accuracy,
     )
 
+    logger.info("[TIMING] confidence: %.3fs", time.monotonic() - t0)
+
     # --- Step 7: Alternatives (lightweight pipeline) ---
+    t0 = time.monotonic()
     alternatives: list[AlternativeRoute] = []
     if (
         include_alternatives
@@ -224,6 +243,9 @@ async def build_prediction(
         alternatives = await _build_alternatives(
             all_routes[1:], departure_time, total_delay
         )
+    logger.info("[TIMING] alternatives: %.3fs", time.monotonic() - t0)
+
+    logger.info("[TIMING] pipeline_total: %.3fs", time.monotonic() - t_pipeline)
 
     # --- Step 8: Assemble response ---
     return PredictionResponse(
