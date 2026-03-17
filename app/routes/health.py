@@ -23,7 +23,7 @@ async def _check_redis() -> dict:
     """Ping Redis and return status."""
     client = get_redis()
     if client is None:
-        return {"status": "unhealthy", "reason": "not configured"}
+        return {"status": "degraded", "reason": "not configured"}
     try:
         await client.ping()
         return {"status": "healthy"}
@@ -38,8 +38,8 @@ async def _check_supabase() -> dict:
         return {"status": "unhealthy", "reason": "not configured"}
     try:
         from app.services.supabase import select
-        # Lightweight query: fetch 0 rows from organizations
-        await select("organizations", params={"select": "id", "limit": "1"})
+        # Lightweight query: fetch 1 row from predictions
+        await select("predictions", params={"select": "id", "limit": "1"})
         return {"status": "healthy"}
     except Exception as exc:
         logger.warning("Supabase health check failed: %s", exc)
@@ -71,7 +71,7 @@ async def health_check():
 
     overall = (
         "degraded"
-        if redis_status["status"] != "healthy"
+        if redis_status["status"] == "unhealthy"
         or supabase_status["status"] != "healthy"
         or any_cb_open
         else "healthy"
