@@ -1,3 +1,4 @@
+# Python
 __pycache__/
 *.py[cod]
 *$py.class
@@ -5,15 +6,32 @@ __pycache__/
 *.egg-info/
 dist/
 build/
+
+# Virtual environments
 venv/
 .venv/
+
+# Environment / secrets
 .env
-.vscode/
-.idea/
-*.swp
-.DS_Store
-Thumbs.db
+.env.*
+!.env.example
+
+# Tooling caches
 .pytest_cache/
+.ruff_cache/
+.mypy_cache/
 htmlcov/
 .coverage
 *.log
+
+# Editors / OS
+.vscode/
+.idea/
+.claude/
+*.swp
+.DS_Store
+Thumbs.db
+
+# Private material, kept locally and never published
+docs/internal/
+CLAUDE.md

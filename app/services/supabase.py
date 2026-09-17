@@ -1,10 +1,10 @@
 """
-Supabase PostgREST async client — FRD Section 4.2.
+Supabase PostgREST async client.
 
 Thin wrapper over the shared httpx client to interact with Supabase's
-PostgREST API.  Follows the same init-at-startup pattern as cache.py.
+PostgREST API. Follows the same init-at-startup pattern as cache.py.
 
-Uses the service_role key (bypasses RLS) for all operations.
+Uses the service_role key (bypasses RLS), so it must only ever run server-side.
 """
 
 from __future__ import annotations
@@ -12,6 +12,7 @@ from __future__ import annotations
 import logging
 from typing import Any
 
+from app.config import get_settings
 from app.services.http_client import get_client
 
 logger = logging.getLogger(__name__)
@@ -24,8 +25,6 @@ _configured: bool = False
 def init_supabase() -> None:
     """Configure PostgREST base URL and auth headers from settings."""
     global _base_url, _headers, _configured
-
-    from app.config import get_settings
 
     settings = get_settings()
     if not settings.supabase_url or not settings.supabase_service_key:
@@ -41,7 +40,7 @@ def init_supabase() -> None:
         "Prefer": "return=representation",
     }
     _configured = True
-    logger.info("Supabase PostgREST client initialised (%s)", _base_url)
+    logger.info("Supabase PostgREST client initialised")
 
 
 def is_configured() -> bool:
@@ -59,27 +58,36 @@ async def select(
     If *single* is True, returns a single dict or None.
     Otherwise returns a list of dicts.
     """
-    client = get_client()
-    url = f"{_base_url}/{table}"
     headers = dict(_headers)
-    if single:
-        headers["Accept"] = "application/vnd.pgrst.object+json"
-    else:
-        headers["Accept"] = "application/json"
+    headers["Accept"] = "application/vnd.pgrst.object+json" if single else "application/json"
 
-    resp = await client.get(url, params=params or {}, headers=headers)
+    resp = await get_client().get(f"{_base_url}/{table}", params=params or {}, headers=headers)
 
+    # PostgREST answers 406 when a single object was requested but no row matched.
     if single and resp.status_code == 406:
         return None
     resp.raise_for_status()
     return resp.json()
 
 
+async def count(table: str, params: dict[str, str] | None = None) -> int:
+    """Return the exact number of rows matching *params* without transferring them."""
+    headers = dict(_headers)
+    headers["Prefer"] = "count=exact"
+
+    query = {"select": "id", "limit": "1", **(params or {})}
+    resp = await get_client().get(f"{_base_url}/{table}", params=query, headers=headers)
+    resp.raise_for_status()
+
+    # Content-Range looks like "0-0/42" (or "*/0" when empty).
+    content_range = resp.headers.get("Content-Range", "")
+    total = content_range.rsplit("/", 1)[-1]
+    return int(total) if total.isdigit() else 0
+
+
 async def insert(table: str, data: dict[str, Any]) -> dict[str, Any]:
     """INSERT a row into a PostgREST table and return the created row."""
-    client = get_client()
-    url = f"{_base_url}/{table}"
-    resp = await client.post(url, json=data, headers=_headers)
+    resp = await get_client().post(f"{_base_url}/{table}", json=data, headers=_headers)
     resp.raise_for_status()
     rows = resp.json()
     return rows[0] if isinstance(rows, list) else rows

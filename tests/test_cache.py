@@ -1,9 +1,8 @@
-"""Tests for Redis cache layer (Block 3)."""
+"""Tests for Redis cache layer."""
 
 from __future__ import annotations
 
-import json
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock
 
 import fakeredis.aioredis
 import pytest
@@ -18,8 +17,8 @@ from app.services.cache import (
     set_redis,
 )
 
-
 # ─── Fixtures ───────────────────────────────────────────────────────────
+
 
 @pytest_asyncio.fixture()
 async def fake_redis():
@@ -32,6 +31,7 @@ async def fake_redis():
 
 
 # ─── Init / Close ───────────────────────────────────────────────────────
+
 
 class TestInitClose:
     def test_init_redis_with_empty_url(self):
@@ -58,6 +58,7 @@ class TestInitClose:
 
 
 # ─── cache_get / cache_set ──────────────────────────────────────────────
+
 
 class TestCacheOperations:
     @pytest.mark.asyncio
@@ -96,6 +97,7 @@ class TestCacheOperations:
 
 # ─── Disabled cache (no URL) ───────────────────────────────────────────
 
+
 class TestCacheDisabled:
     @pytest.mark.asyncio
     async def test_get_returns_none_when_disabled(self):
@@ -110,6 +112,7 @@ class TestCacheDisabled:
 
 
 # ─── Graceful degradation (Redis errors) ───────────────────────────────
+
 
 class TestGracefulDegradation:
     @pytest.mark.asyncio

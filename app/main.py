@@ -1,7 +1,13 @@
+"""FastAPI application and lifespan wiring."""
+
+from __future__ import annotations
+
+from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
 
+from app import __version__
 from app.config import get_settings
 from app.errors import register_error_handlers
 from app.logging_config import setup_logging
@@ -9,20 +15,27 @@ from app.middleware import RequestIdMiddleware, TimingMiddleware
 from app.routes.analytics import router as analytics_router
 from app.routes.health import router as health_router
 from app.routes.predictions import router as predictions_router
+from app.services import supabase
 from app.services.cache import close_redis, init_redis
 from app.services.http_client import close_client, init_client
-from app.services.supabase import init_supabase
 from app.stores import init_stores
 
 
 @asynccontextmanager
-async def lifespan(application: FastAPI):
+async def lifespan(application: FastAPI) -> AsyncIterator[None]:
     """Manage startup/shutdown of shared resources."""
     settings = get_settings()
     setup_logging(settings.log_level)
     init_client()
     init_redis(settings.upstash_redis_url)
-    init_supabase()
+    supabase.init_supabase()
+
+    if settings.app_env == "production" and not (supabase.is_configured() and settings.supabase_jwt_secret):
+        # Without Supabase every request would be authenticated as the dev organization.
+        raise RuntimeError(
+            "SUPABASE_URL, SUPABASE_SERVICE_KEY and SUPABASE_JWT_SECRET are required in production"
+        )
+
     init_stores()
     yield
     await close_redis()
@@ -37,7 +50,8 @@ app = FastAPI(
         "along specific routes and suggests alternatives when delays exceed a threshold.\n\n"
         "### Key features\n"
         "- **Delay prediction** — per-segment breakdown with confidence score\n"
-        "- **Alternative routes** — suggested when predicted delay > 20 min\n"
+        "- **Alternative routes** — suggested when the predicted delay exceeds the threshold "
+        "(15 min by default)\n"
         "- **Feedback loop** — submit actual delays to improve future predictions\n"
         "- **Accuracy analytics** — MAE, within-10/20 min rates, breakdown by weather type\n\n"
         "### How it works\n"
@@ -50,7 +64,7 @@ app = FastAPI(
         "- **Bearer token** — `Authorization: Bearer <JWT>`\n"
         "- **API key** — `X-API-Key: <key>`\n"
     ),
-    version="0.1.0",
+    version=__version__,
     lifespan=lifespan,
     openapi_tags=[
         {
@@ -66,18 +80,7 @@ app = FastAPI(
             "description": "Service health check with dependency status, metrics, and active alerts.",
         },
     ],
-    contact={
-        "name": "Logintel Support",
-        "email": "support@logintel.io",
-        "url": "https://logintel.io",
-    },
-    license_info={
-        "name": "Proprietary",
-    },
-    servers=[
-        {"url": "https://api.logintel.io", "description": "Production"},
-        {"url": "https://sandbox.logintel.io", "description": "Sandbox (coming soon)"},
-    ],
+    license_info={"name": "MIT", "url": "https://opensource.org/licenses/MIT"},
 )
 
 register_error_handlers(app)

@@ -1,146 +1,110 @@
-# Logintel API — FAQ & Troubleshooting
+# FAQ & Troubleshooting
 
 ## General
 
-### What is Logintel API?
-Logintel API predicts weather-related delays for road freight transport. Given an origin, destination, and departure time, it estimates per-segment delays based on weather forecasts, road type, altitude, and time of day.
+### What does Logintel API predict?
+The extra travel time caused by **weather** — rain, snow, wind and fog —
+along a specific road route, on top of the normal driving time. It does not
+model traffic, accidents or road works.
 
-### How accurate are the predictions?
-Accuracy depends on the forecast time horizon. Predictions within 6 hours of departure typically achieve 85%+ confidence. Predictions 48+ hours out have lower confidence. The system improves over time through user feedback and automatic calibration.
+### How is the delay calculated?
+1. The route is computed with OpenRouteService (heavy-goods-vehicle profile).
+2. Points are sampled every 50 km along it, each with an estimated arrival time.
+3. The hourly forecast at each point and hour is fetched from Open-Meteo.
+4. Each weather condition maps to a base delay per 100 km, then multiplied by
+   road type, altitude, time of day and a calibration coefficient.
+5. Tunnels, bridges, mountain passes and urban centres from OpenStreetMap
+   adjust the multipliers.
+6. Segment delays are summed.
 
-### What geographic area is covered?
-Logintel API covers any road routable by OpenRouteService, with weather data from Open-Meteo. In practice, this means most of Europe and many other regions worldwide. Weather forecast quality is best in Europe.
+The README describes every table and formula.
 
 ### How far ahead can I predict?
-The weather forecast horizon is up to 72 hours. Predictions beyond 48 hours have reduced confidence (typically below 55%).
+Up to **72 hours** from now (`MAX_FORECAST_HOURS`). Requests with a later
+`departure_time` are rejected with `400`.
 
----
+### What geographic area is covered?
+Anywhere OpenRouteService can route and Open-Meteo has forecasts — in
+practice most of the world, with the heuristics tuned on European roads.
+
+### Does it use machine learning?
+No. Predictions come from transparent heuristics whose coefficients are
+calibrated over time from the feedback you submit.
 
 ## Authentication
 
-### How do I get an API key?
-Contact support@logintel.io to receive your organization credentials. You will get either a JWT token or an API key depending on your integration preference.
+### API key or Bearer token?
+- **API key** (`X-API-Key`): long-lived, best for server-to-server integrations.
+- **Bearer token** (`Authorization: Bearer`): a Supabase access token, best for
+  apps where users sign in.
 
-### What's the difference between JWT and API Key?
-- **JWT (Bearer token)**: Short-lived, obtained through Supabase auth. Best for web/mobile apps with user sessions.
-- **API Key (X-API-Key)**: Long-lived, best for server-to-server integrations and scripts.
+Both give the same access. Keys are stored as SHA-256 hashes; if you lose a
+key it cannot be recovered, only replaced.
 
-Both provide the same access level. Use whichever fits your architecture.
-
-### I'm getting a 401 Unauthorized error
-Check that:
-1. Your `Authorization: Bearer <token>` or `X-API-Key: <key>` header is present.
-2. The token/key is valid and not expired (JWTs expire).
-3. There are no extra spaces or newlines in the header value.
-
----
-
-## API Usage
-
-### What are the rate limits?
-| Tier | Requests/hour | Predictions/month |
-|---|---|---|
-| Free | 50 | 500 |
-| Starter | 200 | 5,000 |
-| Professional | 1,000 | 50,000 |
-| Enterprise | Custom | Custom |
-
-Rate limits apply to `POST /v1/predictions` and `POST .../feedback`. Read operations (`GET`) are not rate-limited.
-
-### I'm getting a 429 Too Many Requests error
-You've exceeded your tier's rate limit. The response includes a `Retry-After` header indicating how many seconds to wait. Implement exponential backoff:
-
-```python
-import time
-
-retry_after = int(response.headers.get("Retry-After", 60))
-time.sleep(retry_after)
-# then retry the request
-```
-
-### What date format should I use?
-All dates must be in **ISO 8601 with timezone**. Examples:
-- `2026-02-15T08:00:00+01:00` (CET)
-- `2026-02-15T07:00:00Z` (UTC)
-
-A `departure_time` without timezone info will be rejected with a 400 error.
-
-### What coordinate format is expected?
-Coordinates use decimal degrees: `lat` (-90 to 90), `lon` (-180 to 180).
-
-Example for Milan: `{"lat": 45.4642, "lon": 9.1900}`
-
----
+### I get `401 UNAUTHORIZED`
+- The header is missing, or the key/token contains extra spaces or newlines.
+- The Supabase token has expired, or its `app_metadata` has no `org_id`.
+- The API key was deactivated (`is_active = false`).
 
 ## Predictions
 
-### How is the delay calculated?
-1. The route is calculated via OpenRouteService (heavy goods vehicle profile).
-2. Points are sampled every 50 km along the route.
-3. For each point, the weather forecast at the estimated arrival time is fetched.
-4. A heuristic formula computes the delay: `base_impact × road_factor × altitude_factor × time_factor × calibration_factor`.
-5. Special route elements (tunnels, bridges, mountain passes) modify the multipliers.
-6. Delays across all segments are summed.
-
-### What are segments?
-The route is divided into ~50 km segments. Each segment has its own weather conditions, road type, altitude, and delay contribution. This lets you identify exactly where on the route the delay is expected.
-
 ### What do the confidence levels mean?
-| Level | Range | Meaning |
+
+| Level | Score | Reading |
 |---|---|---|
-| `high` | 85–100% | Very reliable — near-term forecast, stable weather, good historical data. |
-| `good` | 70–84% | Reliable — some uncertainty in weather or moderate time horizon. |
-| `moderate` | 55–69% | Use with caution — longer time horizon or unstable weather patterns. |
-| `low` | < 55% | Low reliability — distant forecast, high weather variability. |
+| `high` | 85–100 | Near-term departure, stable weather, complete data |
+| `good` | 70–84 | Reliable; some uncertainty in the forecast |
+| `moderate` | 55–69 | Use with caution; longer horizon or unstable weather |
+| `low` | < 55 | Distant departure and/or highly variable conditions |
 
-Confidence is computed from 4 components (weighted):
-- **Time horizon (40%)**: shorter = higher confidence.
-- **Weather stability (30%)**: stable conditions across segments = higher.
-- **Historical accuracy (20%)**: based on past prediction accuracy from feedback.
-- **Data completeness (10%)**: % of sample points with weather data available.
+The score weights the time horizon (40%), weather stability across segments
+(30%), the historical accuracy of past predictions (20%) and the share of
+segments with forecast data (10%).
 
-### When are alternative routes suggested?
-Alternatives appear only when **both** conditions are met:
-1. `include_alternatives` is set to `true` in the request.
-2. The main route's predicted delay exceeds 20 minutes.
+### When do I get alternative routes?
+Only when **both** hold: `include_alternatives` is `true` in the request and
+the predicted delay on the main route exceeds the configured threshold
+(15 minutes by default). Up to 2 alternatives are returned, each with the
+minutes it saves versus the main route.
 
-Up to 2 alternatives are returned, each with delay savings compared to the main route.
+### Why is `data_completeness` below 100?
+The weather provider had no forecast for one or more sample points at their
+arrival hour. Those segments are treated as clear weather, and the confidence
+score is lowered accordingly.
 
----
+## Feedback and calibration
 
-## Feedback
+### Why submit feedback?
+Feedback is the only input of the calibration system. When at least 20
+entries spanning 14 days and 3 distinct weather conditions exist, the
+coefficients are re-estimated and a new calibration version is created.
+Calibration is global: every organization's feedback improves the model for
+everyone.
 
-### Why should I submit feedback?
-Feedback is the input for the calibration system. After enough feedback (20+ entries over 14+ days), the system automatically adjusts its prediction coefficients. More feedback = more accurate predictions for your organization.
-
-### What is the feedback window?
-Feedback must be submitted within **7 days** of the prediction's departure time. After that, the feedback endpoint returns a 400 error.
-
-### Can I submit feedback more than once?
-No. Only one feedback entry is allowed per prediction. Attempting a second submission returns a 400 error with the message "Feedback already submitted for this prediction".
-
-### What values can actual_delay_minutes take?
-- **Range**: -60 to 1440 minutes.
-- **Negative values**: the trip was faster than expected (e.g., -10 means 10 minutes early).
-- **Zero**: no delay at all.
-- **Positive**: actual delay in minutes.
-
----
+### What are the feedback rules?
+- Within **7 days** of the prediction's departure time.
+- **One** entry per prediction.
+- `actual_delay_minutes` between -60 and 1440 (negative = faster than planned).
 
 ## Troubleshooting
 
-### I'm getting a 502 Service Unavailable error
-An upstream service (routing, weather, or elevation) is temporarily down. The API uses circuit breakers — after multiple failures, it will fail fast to avoid long waits.
+### `502 SERVICE_UNAVAILABLE`
+An upstream service (routing or weather) is down. After 5 consecutive
+failures the circuit breaker opens and the API fails fast for 30 seconds
+before probing again. Retry after 30–60 s; `GET /v1/health` shows the state
+of each breaker (`cb:ors`, `cb:open_meteo`, …).
 
-**What to do**: Wait 30–60 seconds and retry. If the issue persists for more than 5 minutes, check `/v1/health` for dependency status.
+### `429 RATE_LIMIT_EXCEEDED`
+You exceeded your organization's hourly limit on `POST` requests. Wait for the
+number of seconds in the `Retry-After` header before retrying.
 
-### My requests are timing out
-Large routes (1000+ km) require more weather API calls and may take 5–10 seconds. This is normal. If requests consistently take more than 15 seconds, check `/v1/health` for degraded dependencies.
+### The first request is slow
+Routes are cached for 24 h, weather for 1 h and OpenStreetMap data for 7 days.
+A cold route needs 3–4 upstream calls (routing, elevation, OpenStreetMap,
+weather) and typically takes a few seconds; repeated or nearby routes are
+served from cache.
 
-### The response seems slow for the first request
-First requests may be slower due to cache misses. Routes are cached for 24 hours and weather data for 1 hour. Subsequent requests for similar routes will be significantly faster.
-
-### The health endpoint shows "degraded" status
-A `degraded` status means either Redis (cache) is down or a circuit breaker is open for an upstream service. The API still functions but may be slower (cache misses) or unable to create predictions (if the routing service is down).
-
-Check the `dependencies` object in the health response for details.
+### `/v1/health` reports `degraded`
+Redis or Supabase is unreachable, or a circuit breaker is open. The
+`dependencies` object says which. The API keeps working without Redis (no
+cache) but every request will hit the upstream services.

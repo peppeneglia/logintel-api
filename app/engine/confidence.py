@@ -1,5 +1,5 @@
 """
-Confidence score calculation — FRD Section 6.5.
+Confidence score calculation.
 
 confidence = (C_horizon x 0.40) + (C_stability x 0.30) + (C_historical x 0.20) + (C_data x 0.10)
 
@@ -12,11 +12,11 @@ Components:
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 from app.models.schemas import ConfidenceComponents, ConfidenceLevel, ConfidenceScore
 
-# Weights per FRD
+# Component weights
 W_HORIZON = 0.40
 W_STABILITY = 0.30
 W_HISTORICAL = 0.20
@@ -29,7 +29,7 @@ DEFAULT_HISTORICAL_ACCURACY = 70.0
 def compute_time_horizon_score(departure: datetime, now: datetime | None = None) -> float:
     """Score based on how far in the future the departure is."""
     if now is None:
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
 
     # Ensure both are timezone-aware for comparison
     if departure.tzinfo is None:
@@ -67,9 +67,7 @@ def compute_weather_stability_score(weather_values: list[float]) -> float:
     return min(score, 95.0)
 
 
-def compute_data_completeness_score(
-    total_points: int, successful_points: int
-) -> float:
+def compute_data_completeness_score(total_points: int, successful_points: int) -> float:
     """Score based on percentage of data points successfully fetched."""
     if total_points == 0:
         return 0.0
@@ -92,10 +90,7 @@ def compute_confidence(
     c_data = compute_data_completeness_score(total_points, successful_points)
 
     overall = (
-        c_horizon * W_HORIZON
-        + c_stability * W_STABILITY
-        + c_historical * W_HISTORICAL
-        + c_data * W_DATA
+        c_horizon * W_HORIZON + c_stability * W_STABILITY + c_historical * W_HISTORICAL + c_data * W_DATA
     )
     overall = round(min(max(overall, 0.0), 100.0), 1)
 

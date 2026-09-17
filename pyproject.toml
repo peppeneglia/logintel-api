@@ -1,0 +1,37 @@
+[project]
+name = "logintel-api"
+version = "0.1.0"
+description = "Weather-aware delay prediction API for road freight transport"
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "MIT" }
+dynamic = ["dependencies"]
+
+[tool.setuptools]
+packages = { find = { include = ["app*"] } }
+
+[tool.setuptools.dynamic]
+dependencies = { file = ["requirements.txt"] }
+
+[tool.ruff]
+target-version = "py311"
+line-length = 110
+extend-exclude = ["venv", ".venv", "docs"]
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "UP", "B", "SIM", "RUF"]
+ignore = [
+    "B008",   # `Depends(...)` in argument defaults is the FastAPI idiom
+    "E501",   # long lines are allowed in docstrings and OpenAPI descriptions
+    "RUF012", # mutable class attributes are used deliberately for constants
+]
+
+[tool.ruff.lint.isort]
+known-first-party = ["app", "tests"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "strict"
+filterwarnings = [
+    "error::DeprecationWarning:app",
+]

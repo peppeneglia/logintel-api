@@ -1,8 +1,9 @@
 """
-Authentication dependency — validates JWT or API key.
+Authentication dependency — validates a Supabase JWT or an API key.
 
-In dev mode (SUPABASE_URL empty), returns a default org context so that
-existing tests pass unchanged without auth headers.
+When Supabase is not configured (SUPABASE_URL empty) every request is
+authenticated as a local development organization. The application refuses
+to start in that state when APP_ENV=production (see app.main).
 """
 
 from __future__ import annotations
@@ -17,8 +18,12 @@ from fastapi import Request
 from app.config import get_settings
 from app.errors import UnauthorizedError
 from app.logging_config import org_id_var
+from app.services import supabase
 
 logger = logging.getLogger(__name__)
+
+# Audience claim of Supabase access tokens for signed-in users
+JWT_AUDIENCE = "authenticated"
 
 
 @dataclass
@@ -43,7 +48,7 @@ async def get_current_org(request: Request) -> OrgContext:
     """FastAPI dependency that returns the authenticated org context."""
     settings = get_settings()
 
-    # Dev mode bypass — no Supabase configured
+    # Development bypass — no Supabase configured
     if not settings.supabase_url:
         org_id_var.set("dev")
         return _DEV_ORG
@@ -64,10 +69,16 @@ async def get_current_org(request: Request) -> OrgContext:
 
 async def _validate_jwt(token: str, secret: str) -> OrgContext:
     """Decode JWT, extract org_id from app_metadata, fetch org from DB."""
+    if not secret:
+        # Never verify HMAC signatures against an empty key.
+        logger.error("SUPABASE_JWT_SECRET is not set — rejecting bearer token")
+        raise UnauthorizedError("Bearer authentication is not available")
+
     try:
-        payload = jwt.decode(token, secret, algorithms=["HS256"], options={"verify_aud": False})
+        payload = jwt.decode(token, secret, algorithms=["HS256"], audience=JWT_AUDIENCE)
     except jwt.InvalidTokenError as exc:
-        raise UnauthorizedError(f"Invalid JWT: {exc}") from exc
+        logger.info("JWT rejected: %s", exc)
+        raise UnauthorizedError("Invalid or expired token") from exc
 
     app_metadata = payload.get("app_metadata", {})
     org_id = app_metadata.get("org_id", "")
@@ -79,8 +90,6 @@ async def _validate_jwt(token: str, secret: str) -> OrgContext:
 
 async def _validate_api_key(key: str) -> OrgContext:
     """Hash the key, look up in api_keys table, return org context."""
-    from app.services import supabase
-
     key_hash = hashlib.sha256(key.encode()).hexdigest()
 
     row = await supabase.select(
@@ -101,8 +110,6 @@ async def _validate_api_key(key: str) -> OrgContext:
 
 async def _fetch_org(org_id: str) -> OrgContext:
     """Fetch organization details from Supabase."""
-    from app.services import supabase
-
     row = await supabase.select(
         "organizations",
         params={"id": f"eq.{org_id}", "select": "*"},

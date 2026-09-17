@@ -1,11 +1,11 @@
 """
-OpenRouteService integration — FRD Section 4.2.
+OpenRouteService integration.
 
 Provides route calculation for heavy-goods vehicles (driving-hgv profile).
 Decodes encoded polylines and extracts road-type information.
 
-Critical constraint: ORS has a 2,000 req/day free limit.
-Route hash allows cache reuse for nearby coordinates (~500m).
+Critical constraint: the ORS free tier allows 2,000 requests/day, so routes
+are cached for 24h and keyed on coordinates snapped to a ~500 m grid.
 """
 
 from __future__ import annotations
@@ -13,8 +13,11 @@ from __future__ import annotations
 import hashlib
 import logging
 from dataclasses import dataclass
+from itertools import pairwise
+from typing import Any
 
 from app.config import get_settings
+from app.engine.sampler import haversine_distance
 from app.models.schemas import Coordinate, RoadType
 from app.services.cache import cache_get, cache_set
 from app.services.http_client import request_with_retry
@@ -26,22 +29,23 @@ logger = logging.getLogger(__name__)
 # ORS way_types: 0=Unknown, 1=StateRoad, 2=Road, 3=Street, 4=Path,
 #                5=Track, 6=Cycleway, 7=Footway, 8=Steps, 9=Ferry, 10=Construction
 _ORS_WAY_TYPE_MAP: dict[int, RoadType] = {
-    0: RoadType.HIGHWAY,       # Unknown → default to highway (motorway segments)
-    1: RoadType.STATE_ROAD,    # State road
-    2: RoadType.PROVINCIAL,    # Road
-    3: RoadType.PROVINCIAL,    # Street
-    4: RoadType.MOUNTAIN,      # Path (likely mountain/rural)
-    5: RoadType.MOUNTAIN,      # Track
+    0: RoadType.HIGHWAY,  # Unknown → default to highway (motorway segments)
+    1: RoadType.STATE_ROAD,  # State road
+    2: RoadType.PROVINCIAL,  # Road
+    3: RoadType.PROVINCIAL,  # Street
+    4: RoadType.MOUNTAIN,  # Path (likely mountain/rural)
+    5: RoadType.MOUNTAIN,  # Track
 }
 
 
 @dataclass
 class RouteResult:
     """Result from ORS directions call."""
+
     polyline: list[Coordinate]
     duration_s: float
     distance_m: float
-    road_types: list[tuple[float, float, RoadType]]  # (start_pct, end_pct, road_type)
+    road_types: list[tuple[float, float, RoadType]]  # (start_fraction, end_fraction, road_type)
 
 
 def decode_polyline(encoded: str, precision: int = 5) -> list[Coordinate]:
@@ -54,7 +58,7 @@ def decode_polyline(encoded: str, precision: int = 5) -> list[Coordinate]:
     index = 0
     lat = 0
     lon = 0
-    factor = 10 ** precision
+    factor = 10**precision
 
     while index < len(encoded):
         # Decode latitude
@@ -67,7 +71,7 @@ def decode_polyline(encoded: str, precision: int = 5) -> list[Coordinate]:
             shift += 5
             if b < 0x20:
                 break
-        lat += (~(result >> 1) if result & 1 else result >> 1)
+        lat += ~(result >> 1) if result & 1 else result >> 1
 
         # Decode longitude
         shift = 0
@@ -79,11 +83,9 @@ def decode_polyline(encoded: str, precision: int = 5) -> list[Coordinate]:
             shift += 5
             if b < 0x20:
                 break
-        lon += (~(result >> 1) if result & 1 else result >> 1)
+        lon += ~(result >> 1) if result & 1 else result >> 1
 
-        coordinates.append(
-            Coordinate(lat=round(lat / factor, 6), lon=round(lon / factor, 6))
-        )
+        coordinates.append(Coordinate(lat=round(lat / factor, 6), lon=round(lon / factor, 6)))
 
     return coordinates
 
@@ -93,8 +95,9 @@ def compute_route_hash(origin: Coordinate, destination: Coordinate) -> str:
     Compute a stable hash for a route based on rounded coordinates.
 
     Coordinates are rounded to ±0.005° (~500m) so nearby origins/destinations
-    produce the same hash, enabling cache reuse (FRD §9.3).
+    produce the same hash, enabling cache reuse.
     """
+
     def _round(val: float) -> float:
         return round(val / 0.005) * 0.005  # round to nearest 0.005° (~500m)
 
@@ -106,36 +109,37 @@ def compute_route_hash(origin: Coordinate, destination: Coordinate) -> str:
 
 
 def _parse_road_types(
-    extra_info: dict, total_distance_m: float
+    extras: dict[str, Any], polyline: list[Coordinate]
 ) -> list[tuple[float, float, RoadType]]:
     """
-    Parse ORS extra_info.waytypes into (start_pct, end_pct, RoadType) tuples.
+    Convert ORS way-type extras into (start_fraction, end_fraction, RoadType) tuples.
 
-    ORS returns waytypes as [[start_idx, end_idx, way_type_code], ...].
-    We convert index-based ranges to distance-percentage ranges.
+    ORS returns ranges of polyline point indices, ``[[start_idx, end_idx, code], ...]``;
+    they are converted into fractions of the total route length.
     """
-    waytypes = extra_info.get("waytype", extra_info.get("waytypes", {})).get("values", [])
-    if not waytypes:
+    # The request parameter is "waytype", but responses use the "waytypes" key.
+    waytypes = extras.get("waytypes") or extras.get("waytype") or {}
+    values = waytypes.get("values", [])
+    if not values or len(polyline) < 2:
         return [(0.0, 1.0, RoadType.HIGHWAY)]
 
-    result: list[tuple[float, float, RoadType]] = []
-    # ORS summary gives total steps; we normalise indices to percentages
-    total_steps = max(wt[1] for wt in waytypes) if waytypes else 1
-    if total_steps == 0:
-        total_steps = 1
+    cumulative_km = [0.0]
+    for prev, curr in pairwise(polyline):
+        cumulative_km.append(cumulative_km[-1] + haversine_distance(prev, curr))
+    total_km = cumulative_km[-1] or 1.0
+    last_idx = len(cumulative_km) - 1
 
-    for start_idx, end_idx, way_code in waytypes:
-        road = _ORS_WAY_TYPE_MAP.get(way_code, RoadType.HIGHWAY)
-        start_pct = start_idx / total_steps
-        end_pct = end_idx / total_steps
-        result.append((start_pct, end_pct, road))
+    return [
+        (
+            cumulative_km[min(start_idx, last_idx)] / total_km,
+            cumulative_km[min(end_idx, last_idx)] / total_km,
+            _ORS_WAY_TYPE_MAP.get(code, RoadType.HIGHWAY),
+        )
+        for start_idx, end_idx, code in values
+    ]
 
-    return result
 
-
-def get_road_type_at_fraction(
-    road_types: list[tuple[float, float, RoadType]], fraction: float
-) -> RoadType:
+def get_road_type_at_fraction(road_types: list[tuple[float, float, RoadType]], fraction: float) -> RoadType:
     """Return the road type at a given fraction (0-1) along the route."""
     for start_pct, end_pct, road_type in road_types:
         if start_pct <= fraction <= end_pct:
@@ -143,22 +147,15 @@ def get_road_type_at_fraction(
     return RoadType.HIGHWAY
 
 
-def _parse_single_route(route_data: dict) -> RouteResult:
+def _parse_single_route(route_data: dict[str, Any]) -> RouteResult:
     """Parse a single ORS route object into a RouteResult."""
     summary = route_data["summary"]
-    geometry = route_data["geometry"]
-    extra_info = route_data.get("extras", {})
-
-    polyline = decode_polyline(geometry)
-    duration_s = summary["duration"]
-    distance_m = summary["distance"]
-    road_types = _parse_road_types(extra_info, distance_m)
-
+    polyline = decode_polyline(route_data["geometry"])
     return RouteResult(
         polyline=polyline,
-        duration_s=duration_s,
-        distance_m=distance_m,
-        road_types=road_types,
+        duration_s=summary["duration"],
+        distance_m=summary["distance"],
+        road_types=_parse_road_types(route_data.get("extras", {}), polyline),
     )
 
 
@@ -168,9 +165,7 @@ def _route_to_dict(r: RouteResult) -> dict:
         "polyline": [{"lat": c.lat, "lon": c.lon} for c in r.polyline],
         "duration_s": r.duration_s,
         "distance_m": r.distance_m,
-        "road_types": [
-            [s, e, rt.value] for s, e, rt in r.road_types
-        ],
+        "road_types": [[s, e, rt.value] for s, e, rt in r.road_types],
     }
 
 
@@ -180,9 +175,7 @@ def _dict_to_route(d: dict) -> RouteResult:
         polyline=[Coordinate(lat=p["lat"], lon=p["lon"]) for p in d["polyline"]],
         duration_s=d["duration_s"],
         distance_m=d["distance_m"],
-        road_types=[
-            (s, e, RoadType(rt)) for s, e, rt in d["road_types"]
-        ],
+        road_types=[(s, e, RoadType(rt)) for s, e, rt in d["road_types"]],
     )
 
 
@@ -196,58 +189,62 @@ def _dicts_to_routes(dicts: list[dict]) -> list[RouteResult]:
     return [_dict_to_route(d) for d in dicts]
 
 
+async def _request_directions(
+    origin: Coordinate,
+    destination: Coordinate,
+    alternatives: bool,
+):
+    """POST a driving-hgv directions request to ORS and return the raw response."""
+    settings = get_settings()
+    body: dict[str, Any] = {
+        "coordinates": [[origin.lon, origin.lat], [destination.lon, destination.lat]],
+        "extra_info": ["waytype"],
+        "instructions": False,
+        "geometry": True,
+    }
+    if alternatives:
+        body["alternative_routes"] = {
+            "target_count": 2,
+            "share_factor": 0.6,
+            "weight_factor": 1.4,
+        }
+
+    return await request_with_retry(
+        "POST",
+        f"{settings.ors_base_url.rstrip('/')}/v2/directions/driving-hgv",
+        headers={"Authorization": settings.ors_api_key},
+        json=body,
+        service_name="ors",
+    )
+
+
 async def get_route(origin: Coordinate, destination: Coordinate) -> RouteResult:
     """
-    Call ORS directions API to get a route for heavy-goods vehicles.
+    Get the main route for heavy-goods vehicles.
 
     Returns decoded polyline, total duration, distance, and road types.
-    Cached for 24h keyed on rounded coordinates (~1km grid).
+    Cached for 24h, keyed on coordinates snapped to a ~500 m grid.
     """
     settings = get_settings()
-    route_hash = compute_route_hash(origin, destination)
-    cache_key = f"route:{route_hash}"
+    cache_key = f"route:{compute_route_hash(origin, destination)}"
 
-    # --- Cache check ---
     cached = await cache_get(cache_key)
     if cached is not None:
         logger.info("ORS route cache HIT (key=%s)", cache_key)
         return _dict_to_route(cached)
 
-    # --- API call ---
-    base_url = settings.ors_base_url.rstrip("/")
-    url = f"{base_url}/v2/directions/driving-hgv"
-
-    headers = {
-        "Authorization": settings.ors_api_key,
-        "Content-Type": "application/json",
-    }
-
-    body = {
-        "coordinates": [
-            [origin.lon, origin.lat],
-            [destination.lon, destination.lat],
-        ],
-        "extra_info": ["waytype"],
-        "instructions": False,
-        "geometry": True,
-    }
-
-    response = await request_with_retry(
-        "POST", url, headers=headers, json=body, service_name="ors",
-    )
+    response = await _request_directions(origin, destination, alternatives=False)
     response.raise_for_status()
-    data = response.json()
-
-    result = _parse_single_route(data["routes"][0])
+    result = _parse_single_route(response.json()["routes"][0])
 
     logger.info(
         "ORS route: %.1f km, %.0f min, %d polyline points",
-        result.distance_m / 1000, result.duration_s / 60, len(result.polyline),
+        result.distance_m / 1000,
+        result.duration_s / 60,
+        len(result.polyline),
     )
 
-    # --- Cache store ---
     await cache_set(cache_key, _route_to_dict(result), ttl=settings.cache_ttl_route)
-
     return result
 
 
@@ -257,80 +254,35 @@ async def get_routes(
     include_alternatives: bool = False,
 ) -> list[RouteResult]:
     """
-    Get route(s) from ORS. When include_alternatives is True, requests up to
-    3 routes (1 main + 2 alternatives) in a single ORS API call.
+    Get the main route, plus up to 2 alternatives when requested.
 
-    Uses a separate cache key from get_route to avoid conflicts.
-    When include_alternatives is False, delegates to get_route.
+    Alternatives come from the same ORS call, so they cost no extra quota.
+    If ORS rejects the alternatives request (e.g. the route exceeds the
+    free-tier distance limit for alternatives), falls back to a single route.
     """
     if not include_alternatives:
         return [await get_route(origin, destination)]
 
     settings = get_settings()
-    route_hash = compute_route_hash(origin, destination)
-    cache_key = f"route:{route_hash}:alt"
+    cache_key = f"route:{compute_route_hash(origin, destination)}:alt"
 
-    # --- Cache check ---
     cached = await cache_get(cache_key)
     if cached is not None:
         logger.info("ORS routes (alt) cache HIT (key=%s)", cache_key)
         return _dicts_to_routes(cached)
 
-    # --- API call with alternatives ---
-    base_url = settings.ors_base_url.rstrip("/")
-    url = f"{base_url}/v2/directions/driving-hgv"
+    response = await _request_directions(origin, destination, alternatives=True)
 
-    headers = {
-        "Authorization": settings.ors_api_key,
-        "Content-Type": "application/json",
-    }
-
-    body = {
-        "coordinates": [
-            [origin.lon, origin.lat],
-            [destination.lon, destination.lat],
-        ],
-        "extra_info": ["waytype"],
-        "instructions": False,
-        "geometry": True,
-        "alternative_routes": {
-            "target_count": 2,
-            "share_factor": 0.6,
-            "weight_factor": 1.4,
-        },
-    }
-
-    response = await request_with_retry(
-        "POST", url, headers=headers, json=body, service_name="ors",
-    )
-
-    # ORS rejects alternative_routes for long routes (>150 km free tier).
-    # Fall back to single-route request so the prediction still succeeds.
-    if response.status_code in (400, 413) or (
-        response.status_code == 200
-        and "error" in (response.headers.get("content-type", ""))
-    ):
-        error_data = response.json()
-        if "error" in error_data:
-            logger.warning(
-                "ORS rejected alternative_routes (code=%s): %s — falling back to single route",
-                error_data["error"].get("code"),
-                error_data["error"].get("message"),
-            )
-            return [await get_route(origin, destination)]
-
-    response.raise_for_status()
-    data = response.json()
-
-    # ORS may return an error body even with 200 status
-    if "error" in data:
+    if response.status_code in (400, 413):
         logger.warning(
-            "ORS error in alternatives response: %s — falling back to single route",
-            data["error"].get("message"),
+            "ORS rejected alternative_routes (HTTP %s): %s — falling back to single route",
+            response.status_code,
+            response.text[:200],
         )
         return [await get_route(origin, destination)]
 
-    results = [_parse_single_route(r) for r in data["routes"]]
+    response.raise_for_status()
+    results = [_parse_single_route(r) for r in response.json()["routes"]]
 
     logger.info(
         "ORS routes: %d routes returned (main: %.1f km, %.0f min)",
@@ -339,7 +291,5 @@ async def get_routes(
         results[0].duration_s / 60,
     )
 
-    # --- Cache store ---
     await cache_set(cache_key, _routes_to_dicts(results), ttl=settings.cache_ttl_route)
-
     return results

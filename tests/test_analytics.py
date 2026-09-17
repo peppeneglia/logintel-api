@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 import pytest
 from fastapi.testclient import TestClient
@@ -34,7 +34,7 @@ def _make_prediction(
 ) -> PredictionResponse:
     origin = Coordinate(lat=45.0, lon=9.0)
     dest = Coordinate(lat=42.0, lon=12.0)
-    dep = datetime(2026, 2, 10, 8, 0, tzinfo=timezone.utc)
+    dep = datetime(2026, 2, 10, 8, 0, tzinfo=UTC)
 
     segment = SegmentDetail(
         index=0,
@@ -129,22 +129,26 @@ class TestAnalyticsWithFeedback:
         for _ in range(2):
             pred = _make_prediction(delay=10.0, weather_type=WeatherType.RAIN)
             stores.prediction_store.save_prediction_sync(pred)
-            stores.prediction_store.save_feedback_sync(FeedbackResponse(
-                prediction_id=pred.id,
-                actual_delay_minutes=15,
-                predicted_delay_minutes=10.0,
-                deviation_minutes=5.0,
-            ))
+            stores.prediction_store.save_feedback_sync(
+                FeedbackResponse(
+                    prediction_id=pred.id,
+                    actual_delay_minutes=15,
+                    predicted_delay_minutes=10.0,
+                    deviation_minutes=5.0,
+                )
+            )
 
         # Snow predictions
         pred = _make_prediction(delay=20.0, weather_type=WeatherType.SNOW)
         stores.prediction_store.save_prediction_sync(pred)
-        stores.prediction_store.save_feedback_sync(FeedbackResponse(
-            prediction_id=pred.id,
-            actual_delay_minutes=30,
-            predicted_delay_minutes=20.0,
-            deviation_minutes=10.0,
-        ))
+        stores.prediction_store.save_feedback_sync(
+            FeedbackResponse(
+                prediction_id=pred.id,
+                actual_delay_minutes=30,
+                predicted_delay_minutes=20.0,
+                deviation_minutes=10.0,
+            )
+        )
 
         resp = client.get("/v1/analytics/accuracy")
         data = resp.json()
@@ -164,12 +168,14 @@ class TestAnalyticsWithFeedback:
             pred = _make_prediction(delay=10.0)
             stores.prediction_store.save_prediction_sync(pred)
             if i == 0:
-                stores.prediction_store.save_feedback_sync(FeedbackResponse(
-                    prediction_id=pred.id,
-                    actual_delay_minutes=12,
-                    predicted_delay_minutes=10.0,
-                    deviation_minutes=2.0,
-                ))
+                stores.prediction_store.save_feedback_sync(
+                    FeedbackResponse(
+                        prediction_id=pred.id,
+                        actual_delay_minutes=12,
+                        predicted_delay_minutes=10.0,
+                        deviation_minutes=2.0,
+                    )
+                )
 
         resp = client.get("/v1/analytics/accuracy")
         data = resp.json()

@@ -1,5 +1,5 @@
 """
-Alert manager — FRD Section 9.2.
+Alert manager.
 
 Evaluates operational thresholds and emits structured log alerts with cooldown
 to prevent spam.  Thresholds:
@@ -13,7 +13,7 @@ from __future__ import annotations
 import logging
 import time
 from dataclasses import dataclass
-from enum import Enum
+from enum import StrEnum
 
 from app.circuit_breaker import CircuitBreakerState, service_breakers
 from app.config import get_settings
@@ -22,7 +22,7 @@ from app.metrics import metrics_collector
 logger = logging.getLogger(__name__)
 
 
-class AlertLevel(str, Enum):
+class AlertLevel(StrEnum):
     CRITICAL = "CRITICAL"
     WARNING = "WARNING"
 
@@ -98,8 +98,7 @@ class AlertManager:
                 alerts.append(alert)
 
         # --- WARNING: cache hit rate (only if there are cache operations) ---
-        total_cache = metrics_collector._cache_hits + metrics_collector._cache_misses
-        if total_cache > 0 and snap.cache_hit_rate_pct < settings.alert_cache_rate_pct:
+        if snap.cache_operations > 0 and snap.cache_hit_rate_pct < settings.alert_cache_rate_pct:
             alert = Alert(
                 level=AlertLevel.WARNING,
                 rule="cache_hit_rate",
@@ -133,11 +132,7 @@ class AlertManager:
     # ------------------------------------------------------------------
     def _should_fire(self, rule: str, level: AlertLevel, now: float) -> bool:
         """Return True if the cooldown for *rule* has expired."""
-        cooldown = (
-            self.COOLDOWN_CRITICAL
-            if level is AlertLevel.CRITICAL
-            else self.COOLDOWN_WARNING
-        )
+        cooldown = self.COOLDOWN_CRITICAL if level is AlertLevel.CRITICAL else self.COOLDOWN_WARNING
         last = self._cooldowns.get(rule, 0.0)
         if now - last < cooldown:
             return False

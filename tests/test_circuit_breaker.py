@@ -1,5 +1,5 @@
 """
-Tests for circuit breaker — FRD Section 4.5.
+Tests for the circuit breaker.
 """
 
 from __future__ import annotations
@@ -19,13 +19,12 @@ from app.circuit_breaker import (
 from app.errors import ServiceUnavailableError
 from app.services.http_client import init_client, request_with_retry
 
-
 # ---------------------------------------------------------------------------
 # CircuitBreaker unit tests
 # ---------------------------------------------------------------------------
 
-class TestCircuitBreaker:
 
+class TestCircuitBreaker:
     def test_initial_state_closed(self):
         cb = CircuitBreaker("test", failure_threshold=3, recovery_timeout=10)
         assert cb.state is CircuitBreakerState.CLOSED
@@ -96,8 +95,8 @@ class TestCircuitBreaker:
 # ServiceBreakers registry tests
 # ---------------------------------------------------------------------------
 
-class TestServiceBreakers:
 
+class TestServiceBreakers:
     def test_lazy_creation(self):
         sb = ServiceBreakers()
         with patch("app.circuit_breaker.get_settings") as mock_settings:
@@ -133,8 +132,8 @@ class TestServiceBreakers:
 # Integration with http_client
 # ---------------------------------------------------------------------------
 
-class TestHttpClientWithCircuitBreaker:
 
+class TestHttpClientWithCircuitBreaker:
     @pytest.fixture(autouse=True)
     def _setup_client(self):
         """Ensure HTTP client is initialised."""
@@ -143,37 +142,37 @@ class TestHttpClientWithCircuitBreaker:
     @respx.mock
     @pytest.mark.asyncio
     async def test_request_passes_when_cb_closed(self):
-        respx.get("https://example.com/api").mock(
-            return_value=httpx.Response(200, json={"ok": True})
-        )
+        respx.get("https://example.com/api").mock(return_value=httpx.Response(200, json={"ok": True}))
         # Fresh breaker for this test
-        with patch("app.circuit_breaker.service_breakers") as mock_sb:
+        with patch("app.services.http_client.service_breakers") as mock_sb:
             mock_breaker = CircuitBreaker("test_svc")
             mock_sb.get.return_value = mock_breaker
 
             response = await request_with_retry(
-                "GET", "https://example.com/api", service_name="test_svc",
+                "GET",
+                "https://example.com/api",
+                service_name="test_svc",
             )
         assert response.status_code == 200
 
     @pytest.mark.asyncio
     async def test_request_failfast_when_cb_open(self):
-        with patch("app.circuit_breaker.service_breakers") as mock_sb:
+        with patch("app.services.http_client.service_breakers") as mock_sb:
             mock_breaker = CircuitBreaker("test_svc", failure_threshold=1)
             mock_breaker.record_failure()  # opens the breaker
             mock_sb.get.return_value = mock_breaker
 
             with pytest.raises(ServiceUnavailableError, match="circuit breaker is OPEN"):
                 await request_with_retry(
-                    "GET", "https://example.com/api", service_name="test_svc",
+                    "GET",
+                    "https://example.com/api",
+                    service_name="test_svc",
                 )
 
     @respx.mock
     @pytest.mark.asyncio
     async def test_no_cb_without_service_name(self):
-        respx.get("https://example.com/api").mock(
-            return_value=httpx.Response(200, json={"ok": True})
-        )
+        respx.get("https://example.com/api").mock(return_value=httpx.Response(200, json={"ok": True}))
         # No service_name → no CB involvement
         response = await request_with_retry("GET", "https://example.com/api")
         assert response.status_code == 200

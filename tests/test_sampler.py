@@ -1,6 +1,6 @@
 """Tests for the route sampler."""
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 from app.engine.sampler import (
     compute_segment_lengths,
@@ -54,7 +54,7 @@ class TestArrivalTimes:
         p1 = Coordinate(lat=45.0, lon=9.0)
         p2 = Coordinate(lat=45.5, lon=9.5)
         p3 = Coordinate(lat=46.0, lon=10.0)
-        dep = datetime(2026, 2, 14, 8, 0, tzinfo=timezone.utc)
+        dep = datetime(2026, 2, 14, 8, 0, tzinfo=UTC)
 
         times = estimate_arrival_times([p1, p2, p3], dep, total_duration_seconds=7200)
         assert times[0] == dep
@@ -65,7 +65,7 @@ class TestArrivalTimes:
 
     def test_single_point_returns_departure(self):
         p = Coordinate(lat=45.0, lon=9.0)
-        dep = datetime(2026, 2, 14, 8, 0, tzinfo=timezone.utc)
+        dep = datetime(2026, 2, 14, 8, 0, tzinfo=UTC)
         times = estimate_arrival_times([p], dep)
         assert times == [dep]
 
@@ -78,4 +78,4 @@ class TestSegmentLengths:
         lengths = compute_segment_lengths([p1, p2, p3])
         assert len(lengths) == 2
         # Each segment ~55km (0.5 degrees latitude)
-        assert all(50 < l < 60 for l in lengths)
+        assert all(50 < length < 60 for length in lengths)

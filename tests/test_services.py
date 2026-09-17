@@ -1,22 +1,22 @@
-"""Tests for external service integrations (Block 2 + Block 3 cache)."""
+"""Tests for external service integrations."""
 
 from __future__ import annotations
 
-import json
-from datetime import datetime, timezone, timedelta
-from unittest.mock import AsyncMock, patch
+from datetime import UTC, datetime
 
 import httpx
 import pytest
 import respx
 
-import app.services.http_client as _hc_mod
 import app.services.cache as _cache_mod
+import app.services.http_client as _hc_mod
 from app.models.schemas import Coordinate, RoadType, WeatherType
+from app.services.elevation import (
+    DEFAULT_ELEVATION_M,
+    get_elevations,
+)
 from app.services.http_client import (
-    close_client,
     get_client,
-    init_client,
     request_with_retry,
 )
 from app.services.ors import (
@@ -28,21 +28,16 @@ from app.services.ors import (
     get_road_type_at_fraction,
     get_route,
 )
+from app.services.prediction import build_prediction
 from app.services.weather import (
     _classify_point_weather,
     _find_hour_index,
     _weather_cache_key,
     get_weather_at_points,
-    _extract_conditions_at_hour,
 )
-from app.services.elevation import (
-    DEFAULT_ELEVATION_M,
-    get_elevations,
-)
-from app.services.prediction import build_prediction
-
 
 # ─── Fixtures ───────────────────────────────────────────────────────────
+
 
 @pytest.fixture(autouse=True)
 def _manage_http_client():
@@ -62,6 +57,7 @@ def _disable_redis():
 
 # ─── HTTP Client Tests ──────────────────────────────────────────────────
 
+
 class TestHttpClient:
     def test_get_client_returns_instance(self):
         client = get_client()
@@ -70,9 +66,7 @@ class TestHttpClient:
     @pytest.mark.asyncio
     async def test_request_with_retry_success(self):
         with respx.mock:
-            respx.get("https://example.com/ok").mock(
-                return_value=httpx.Response(200, json={"ok": True})
-            )
+            respx.get("https://example.com/ok").mock(return_value=httpx.Response(200, json={"ok": True}))
             resp = await request_with_retry("GET", "https://example.com/ok")
             assert resp.status_code == 200
             assert resp.json() == {"ok": True}
@@ -85,24 +79,19 @@ class TestHttpClient:
                 httpx.Response(500, text="error"),
                 httpx.Response(200, json={"recovered": True}),
             ]
-            resp = await request_with_retry(
-                "GET", "https://example.com/flaky", retries=2, backoff=0.01
-            )
+            resp = await request_with_retry("GET", "https://example.com/flaky", retries=2, backoff=0.01)
             assert resp.status_code == 200
 
     @pytest.mark.asyncio
     async def test_request_with_retry_exhausts_retries(self):
         with respx.mock:
-            respx.get("https://example.com/down").mock(
-                return_value=httpx.Response(503, text="unavailable")
-            )
+            respx.get("https://example.com/down").mock(return_value=httpx.Response(503, text="unavailable"))
             with pytest.raises(httpx.HTTPStatusError):
-                await request_with_retry(
-                    "GET", "https://example.com/down", retries=2, backoff=0.01
-                )
+                await request_with_retry("GET", "https://example.com/down", retries=2, backoff=0.01)
 
 
 # ─── ORS Tests ──────────────────────────────────────────────────────────
+
 
 class TestPolylineDecode:
     def test_decode_simple_polyline(self):
@@ -160,15 +149,13 @@ class TestOrsGetRoute:
     @pytest.mark.asyncio
     async def test_get_route_parses_response(self):
         ors_response = {
-            "routes": [{
-                "summary": {"duration": 18000.0, "distance": 500000.0},
-                "geometry": "_p~iF~ps|U_ulLnnqC_mqNvxq`@",
-                "extras": {
-                    "waytypes": {
-                        "values": [[0, 1, 0], [1, 2, 1]]
-                    }
-                },
-            }]
+            "routes": [
+                {
+                    "summary": {"duration": 18000.0, "distance": 500000.0},
+                    "geometry": "_p~iF~ps|U_ulLnnqC_mqNvxq`@",
+                    "extras": {"waytypes": {"values": [[0, 1, 0], [1, 2, 1]]}},
+                }
+            ]
         }
         with respx.mock:
             respx.post("https://api.openrouteservice.org/v2/directions/driving-hgv").mock(
@@ -198,15 +185,16 @@ class TestOrsGetRoute:
 
 # ─── Weather Tests ──────────────────────────────────────────────────────
 
+
 class TestWeatherHelpers:
     def test_find_hour_index_match(self):
         hours = ["2026-02-15T06:00", "2026-02-15T07:00", "2026-02-15T08:00"]
-        dt = datetime(2026, 2, 15, 8, 30, tzinfo=timezone.utc)
+        dt = datetime(2026, 2, 15, 8, 30, tzinfo=UTC)
         assert _find_hour_index(hours, dt) == 2
 
     def test_find_hour_index_no_match(self):
         hours = ["2026-02-15T06:00", "2026-02-15T07:00"]
-        dt = datetime(2026, 2, 15, 10, 0, tzinfo=timezone.utc)
+        dt = datetime(2026, 2, 15, 10, 0, tzinfo=UTC)
         assert _find_hour_index(hours, dt) is None
 
     def test_classify_rain(self):
@@ -250,7 +238,7 @@ class TestWeatherService:
                 return_value=httpx.Response(200, json=open_meteo_response)
             )
             points = [Coordinate(lat=45.0, lon=9.0)]
-            times = [datetime(2026, 2, 15, 8, 0, tzinfo=timezone.utc)]
+            times = [datetime(2026, 2, 15, 8, 0, tzinfo=UTC)]
             result = await get_weather_at_points(points, times)
             assert len(result) == 1
             assert len(result[0]) == 1
@@ -263,13 +251,14 @@ class TestWeatherService:
                 return_value=httpx.Response(500, text="error")
             )
             points = [Coordinate(lat=45.0, lon=9.0)]
-            times = [datetime(2026, 2, 15, 8, 0, tzinfo=timezone.utc)]
+            times = [datetime(2026, 2, 15, 8, 0, tzinfo=UTC)]
             result = await get_weather_at_points(points, times)
             assert len(result) == 1
-            assert result[0] == []  # clear sky fallback
+            assert result[0] is None  # no forecast data available
 
 
 # ─── Elevation Tests ────────────────────────────────────────────────────
+
 
 class TestElevationService:
     @pytest.mark.asyncio
@@ -312,18 +301,19 @@ class TestElevationService:
 
 # ─── Orchestrator Tests ─────────────────────────────────────────────────
 
+
 class TestBuildPrediction:
     @pytest.mark.asyncio
     async def test_full_pipeline_with_mocks(self):
         """Test the complete orchestration with all external APIs mocked."""
         ors_response = {
-            "routes": [{
-                "summary": {"duration": 18000.0, "distance": 500000.0},
-                "geometry": "_p~iF~ps|U_ulLnnqC_mqNvxq`@",
-                "extras": {
-                    "waytypes": {"values": [[0, 2, 0]]}
-                },
-            }]
+            "routes": [
+                {
+                    "summary": {"duration": 18000.0, "distance": 500000.0},
+                    "geometry": "_p~iF~ps|U_ulLnnqC_mqNvxq`@",
+                    "extras": {"waytypes": {"values": [[0, 2, 0]]}},
+                }
+            ]
         }
 
         open_meteo_response = {
@@ -355,7 +345,7 @@ class TestBuildPrediction:
                 return_value=httpx.Response(200, json=elevation_response)
             )
 
-            departure = datetime(2026, 2, 15, 8, 0, tzinfo=timezone.utc)
+            departure = datetime(2026, 2, 15, 8, 0, tzinfo=UTC)
             result = await build_prediction(
                 Coordinate(lat=45.464, lon=9.190),
                 Coordinate(lat=41.902, lon=12.496),
@@ -371,13 +361,13 @@ class TestBuildPrediction:
     async def test_pipeline_with_elevation_failure(self):
         """Pipeline should still work when elevation API fails."""
         ors_response = {
-            "routes": [{
-                "summary": {"duration": 18000.0, "distance": 500000.0},
-                "geometry": "_p~iF~ps|U_ulLnnqC_mqNvxq`@",
-                "extras": {
-                    "waytypes": {"values": [[0, 2, 0]]}
-                },
-            }]
+            "routes": [
+                {
+                    "summary": {"duration": 18000.0, "distance": 500000.0},
+                    "geometry": "_p~iF~ps|U_ulLnnqC_mqNvxq`@",
+                    "extras": {"waytypes": {"values": [[0, 2, 0]]}},
+                }
+            ]
         }
 
         open_meteo_response = {
@@ -401,7 +391,7 @@ class TestBuildPrediction:
                 return_value=httpx.Response(500, text="error")
             )
 
-            departure = datetime(2026, 2, 15, 8, 0, tzinfo=timezone.utc)
+            departure = datetime(2026, 2, 15, 8, 0, tzinfo=UTC)
             result = await build_prediction(
                 Coordinate(lat=45.464, lon=9.190),
                 Coordinate(lat=41.902, lon=12.496),
@@ -414,7 +404,8 @@ class TestBuildPrediction:
                 assert seg.factors.altitude_m == DEFAULT_ELEVATION_M
 
 
-# ─── Cache Integration Tests (Block 3) ────────────────────────────────
+# ─── Cache Integration Tests ────────────────────────────────
+
 
 class TestOrsCacheHit:
     @pytest.mark.asyncio
@@ -443,9 +434,7 @@ class TestOrsCacheHit:
 
         # Call get_route — should NOT hit ORS
         with respx.mock:
-            ors_route = respx.post(
-                "https://api.openrouteservice.org/v2/directions/driving-hgv"
-            )
+            ors_route = respx.post("https://api.openrouteservice.org/v2/directions/driving-hgv")
             ors_route.mock(return_value=httpx.Response(500, text="should not be called"))
 
             result = await get_route(origin, dest)
@@ -470,7 +459,7 @@ class TestWeatherCacheHit:
         _cache_mod._redis = fake
 
         point = Coordinate(lat=45.0, lon=9.0)
-        arrival = datetime(2026, 2, 15, 8, 0, tzinfo=timezone.utc)
+        arrival = datetime(2026, 2, 15, 8, 0, tzinfo=UTC)
         cache_key = _weather_cache_key(point.lat, point.lon, "2026-02-15T08:00")
 
         # Pre-populate cache with a single-hour slice

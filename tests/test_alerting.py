@@ -1,5 +1,5 @@
 """
-Tests for alerting — FRD Section 9.2.
+Tests for alerting.
 """
 
 from __future__ import annotations
@@ -7,11 +7,8 @@ from __future__ import annotations
 import time
 from unittest.mock import patch
 
-import pytest
-
 from app.alerting import AlertLevel, AlertManager
-from app.circuit_breaker import CircuitBreaker, CircuitBreakerState, ServiceBreakers
-from app.metrics import MetricsCollector, MetricsSnapshot
+from app.metrics import MetricsSnapshot
 
 
 def _ok_snapshot(**overrides) -> MetricsSnapshot:
@@ -24,13 +21,13 @@ def _ok_snapshot(**overrides) -> MetricsSnapshot:
         latency_p95_ms=200.0,
         latency_p99_ms=500.0,
         cache_hit_rate_pct=80.0,
+        cache_operations=100,
     )
     defaults.update(overrides)
     return MetricsSnapshot(**defaults)
 
 
 class TestAlertManager:
-
     def _make_manager(self) -> AlertManager:
         """Return a fresh AlertManager (no leftover cooldown state)."""
         return AlertManager()
@@ -39,8 +36,6 @@ class TestAlertManager:
     @patch("app.alerting.service_breakers")
     def test_no_alert_when_metrics_ok(self, mock_sb, mock_mc):
         mock_mc.snapshot.return_value = _ok_snapshot()
-        mock_mc._cache_hits = 80
-        mock_mc._cache_misses = 20
         mock_sb.all_statuses.return_value = {}
 
         am = self._make_manager()
@@ -51,8 +46,6 @@ class TestAlertManager:
     @patch("app.alerting.service_breakers")
     def test_critical_alert_on_high_error_rate(self, mock_sb, mock_mc):
         mock_mc.snapshot.return_value = _ok_snapshot(error_rate_pct=15.0)
-        mock_mc._cache_hits = 80
-        mock_mc._cache_misses = 20
         mock_sb.all_statuses.return_value = {}
 
         am = self._make_manager()
@@ -65,8 +58,6 @@ class TestAlertManager:
     @patch("app.alerting.service_breakers")
     def test_critical_alert_on_cb_open_over_5min(self, mock_sb, mock_mc):
         mock_mc.snapshot.return_value = _ok_snapshot()
-        mock_mc._cache_hits = 80
-        mock_mc._cache_misses = 20
         mock_sb.all_statuses.return_value = {
             "ors": {
                 "name": "ors",
@@ -87,8 +78,6 @@ class TestAlertManager:
     @patch("app.alerting.service_breakers")
     def test_warning_alert_on_high_latency(self, mock_sb, mock_mc):
         mock_mc.snapshot.return_value = _ok_snapshot(latency_p95_ms=4000.0)
-        mock_mc._cache_hits = 80
-        mock_mc._cache_misses = 20
         mock_sb.all_statuses.return_value = {}
 
         am = self._make_manager()
@@ -101,8 +90,6 @@ class TestAlertManager:
     @patch("app.alerting.service_breakers")
     def test_warning_alert_on_low_cache_rate(self, mock_sb, mock_mc):
         mock_mc.snapshot.return_value = _ok_snapshot(cache_hit_rate_pct=20.0)
-        mock_mc._cache_hits = 2
-        mock_mc._cache_misses = 8
         mock_sb.all_statuses.return_value = {}
 
         am = self._make_manager()
@@ -115,8 +102,6 @@ class TestAlertManager:
     @patch("app.alerting.service_breakers")
     def test_cooldown_prevents_duplicate_alerts(self, mock_sb, mock_mc):
         mock_mc.snapshot.return_value = _ok_snapshot(error_rate_pct=15.0)
-        mock_mc._cache_hits = 80
-        mock_mc._cache_misses = 20
         mock_sb.all_statuses.return_value = {}
 
         am = self._make_manager()
@@ -129,8 +114,6 @@ class TestAlertManager:
     @patch("app.alerting.service_breakers")
     def test_cooldown_expires_alert_fires_again(self, mock_sb, mock_mc):
         mock_mc.snapshot.return_value = _ok_snapshot(error_rate_pct=15.0)
-        mock_mc._cache_hits = 80
-        mock_mc._cache_misses = 20
         mock_sb.all_statuses.return_value = {}
 
         am = self._make_manager()
@@ -149,8 +132,6 @@ class TestAlertManager:
             error_rate_pct=15.0,
             latency_p95_ms=5000.0,
         )
-        mock_mc._cache_hits = 80
-        mock_mc._cache_misses = 20
         mock_sb.all_statuses.return_value = {}
 
         am = self._make_manager()
@@ -163,8 +144,6 @@ class TestAlertManager:
     @patch("app.alerting.service_breakers")
     def test_maybe_check_respects_throttle(self, mock_sb, mock_mc):
         mock_mc.snapshot.return_value = _ok_snapshot()
-        mock_mc._cache_hits = 80
-        mock_mc._cache_misses = 20
         mock_sb.all_statuses.return_value = {}
 
         am = self._make_manager()
@@ -178,8 +157,6 @@ class TestAlertManager:
     @patch("app.alerting.service_breakers")
     def test_alert_logged_with_correct_level(self, mock_sb, mock_mc):
         mock_mc.snapshot.return_value = _ok_snapshot(error_rate_pct=15.0)
-        mock_mc._cache_hits = 80
-        mock_mc._cache_misses = 20
         mock_sb.all_statuses.return_value = {}
 
         am = self._make_manager()

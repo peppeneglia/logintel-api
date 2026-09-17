@@ -1,5 +1,5 @@
 """
-Consistent error handling — FRD Section 8.3.
+Consistent error handling.
 
 All API errors return:
     {"error": {"code": "...", "message": "...", "details": [...]}}
@@ -13,17 +13,20 @@ from fastapi import FastAPI, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 
-logger = logging.getLogger(__name__)
-
 from app.models.schemas import ErrorBody, ErrorDetail, ErrorResponse
+
+logger = logging.getLogger(__name__)
 
 
 # --- Custom exceptions ---
 
+
 class LogintelError(Exception):
     """Base exception for Logintel API."""
 
-    def __init__(self, code: str, message: str, status_code: int = 500, details: list[ErrorDetail] | None = None):
+    def __init__(
+        self, code: str, message: str, status_code: int = 500, details: list[ErrorDetail] | None = None
+    ):
         self.code = code
         self.message = message
         self.status_code = status_code
@@ -59,16 +62,15 @@ class ServiceUnavailableError(LogintelError):
 
 # --- Exception handlers ---
 
+
 def register_error_handlers(app: FastAPI) -> None:
     """Register all exception handlers on the FastAPI app."""
 
     @app.exception_handler(LogintelError)
     async def logintel_error_handler(_request: Request, exc: LogintelError) -> JSONResponse:
-        body = ErrorResponse(
-            error=ErrorBody(code=exc.code, message=exc.message, details=exc.details)
-        )
+        body = ErrorResponse(error=ErrorBody(code=exc.code, message=exc.message, details=exc.details))
         headers: dict[str, str] = {}
-        if exc.status_code == 429 and isinstance(exc, RateLimitError):
+        if isinstance(exc, RateLimitError):
             headers["Retry-After"] = str(exc.retry_after)
         return JSONResponse(status_code=exc.status_code, content=body.model_dump(), headers=headers)
 
@@ -90,7 +92,5 @@ def register_error_handlers(app: FastAPI) -> None:
     @app.exception_handler(Exception)
     async def generic_error_handler(_request: Request, exc: Exception) -> JSONResponse:
         logger.exception("Unhandled exception: %s", exc)
-        body = ErrorResponse(
-            error=ErrorBody(code="INTERNAL_ERROR", message="An unexpected error occurred")
-        )
+        body = ErrorResponse(error=ErrorBody(code="INTERNAL_ERROR", message="An unexpected error occurred"))
         return JSONResponse(status_code=500, content=body.model_dump())

@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import hashlib
 from unittest.mock import AsyncMock, patch
 
 import jwt
@@ -15,7 +14,7 @@ from app.main import app
 
 client = TestClient(app)
 
-_JWT_SECRET = "test-secret-for-jwt"
+_JWT_SECRET = "test-secret-for-jwt-at-least-32-bytes-long"
 
 
 def _mock_org_context() -> OrgContext:
@@ -71,7 +70,7 @@ class TestAuthEnforced:
 
     def test_valid_jwt_returns_200(self, _enforce_auth):
         token = jwt.encode(
-            {"sub": "user-1", "app_metadata": {"org_id": "org-123"}},
+            {"sub": "user-1", "aud": "authenticated", "app_metadata": {"org_id": "org-123"}},
             _JWT_SECRET,
             algorithm="HS256",
         )

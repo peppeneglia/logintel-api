@@ -1,15 +1,20 @@
 """
-Prediction engine heuristics — FRD Section 6.
+Prediction engine heuristics.
 
-Calculates weather-based delay for a route segment using the formula:
-    delay = base_impact x severity x F_road x F_altitude x F_time x C_calibration
+Calculates the weather-related delay of a route segment. For every active
+weather condition on the segment:
+
+    delay = base_impact(type, severity) x F_road x F_altitude x F_time x C_calibration
     effective_delay = delay x (segment_km / 100)
+
+``base_impact`` is expressed in minutes per 100 km and already encodes the
+severity of the phenomenon. Delays of concurrent conditions are summed.
 """
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from datetime import datetime
-from typing import Optional
 
 from app.models.schemas import (
     RoadType,
@@ -18,7 +23,7 @@ from app.models.schemas import (
     WeatherType,
 )
 
-# --- Weather impact: base delay in minutes per 100km (FRD 6.2) ---
+# --- Weather impact: base delay in minutes per 100 km ---
 
 WEATHER_IMPACT: dict[WeatherType, dict[Severity, float]] = {
     WeatherType.RAIN: {
@@ -34,7 +39,7 @@ WEATHER_IMPACT: dict[WeatherType, dict[Severity, float]] = {
         Severity.VERY_HEAVY: 70.0,
     },
     WeatherType.WIND: {
-        Severity.LIGHT: 0.0,
+        Severity.LIGHT: 0.0,  # never produced: wind below 40 km/h is ignored
         Severity.MODERATE: 6.0,
         Severity.HEAVY: 12.0,
         Severity.VERY_HEAVY: 30.0,
@@ -43,7 +48,7 @@ WEATHER_IMPACT: dict[WeatherType, dict[Severity, float]] = {
         Severity.LIGHT: 8.0,
         Severity.MODERATE: 18.0,
         Severity.HEAVY: 40.0,
-        Severity.VERY_HEAVY: 40.0,  # dense fog caps at same value
+        Severity.VERY_HEAVY: 40.0,  # never produced: dense fog is the worst class
     },
 }
 
@@ -64,19 +69,17 @@ SNOW_THRESHOLDS: list[tuple[float, Severity]] = [
 ]
 
 WIND_THRESHOLDS: list[tuple[float, Severity]] = [
-    (80.0, Severity.VERY_HEAVY),   # storm
-    (60.0, Severity.HEAVY),        # very strong
-    (40.0, Severity.MODERATE),     # strong
+    (80.0, Severity.VERY_HEAVY),  # storm
+    (60.0, Severity.HEAVY),  # very strong
+    (40.0, Severity.MODERATE),  # strong
 ]
 
-# Fog: thresholds are visibility in meters (lower = worse)
-FOG_THRESHOLDS: list[tuple[float, Severity]] = [
-    (50.0, Severity.HEAVY),        # dense: <50m
-    (200.0, Severity.MODERATE),    # moderate: 50-200m
-    (500.0, Severity.LIGHT),       # light: 200-500m
-]
+# Fog: visibility bounds in meters (lower = worse)
+FOG_DENSE_BELOW_M = 50.0
+FOG_MODERATE_BELOW_M = 200.0
+FOG_LIGHT_UP_TO_M = 500.0
 
-# --- Context multipliers (FRD 6.3) ---
+# --- Context multipliers ---
 
 ROAD_FACTORS: dict[RoadType, float] = {
     RoadType.HIGHWAY: 0.8,
@@ -93,38 +96,38 @@ ALTITUDE_BANDS: list[tuple[float, float]] = [
     (0.0, 1.0),
 ]
 
-# Summer exodus periods (approximate: mid-July to mid-August weekends)
+# Summer exodus: Fridays and weekends in July and August
 SUMMER_EXODUS_MONTHS = {7, 8}
 
 
-def classify_rain(mm_per_hour: float) -> Optional[Severity]:
+def classify_rain(mm_per_hour: float) -> Severity | None:
     for threshold, severity in RAIN_THRESHOLDS:
         if mm_per_hour >= threshold:
             return severity
     return None
 
 
-def classify_snow(cm_per_hour: float) -> Optional[Severity]:
+def classify_snow(cm_per_hour: float) -> Severity | None:
     for threshold, severity in SNOW_THRESHOLDS:
         if cm_per_hour >= threshold:
             return severity
     return None
 
 
-def classify_wind(km_per_hour: float) -> Optional[Severity]:
+def classify_wind(km_per_hour: float) -> Severity | None:
     for threshold, severity in WIND_THRESHOLDS:
         if km_per_hour >= threshold:
             return severity
     return None
 
 
-def classify_fog(visibility_m: float) -> Optional[Severity]:
-    """Lower visibility = more severe. Thresholds are upper bounds."""
-    for upper_bound, severity in FOG_THRESHOLDS:
-        if visibility_m < upper_bound:
-            return severity
-    # visibility >= 500m: check if still reduced enough to count as light fog
-    if visibility_m <= 500.0:
+def classify_fog(visibility_m: float) -> Severity | None:
+    """Dense fog below 50 m, moderate below 200 m, light up to 500 m."""
+    if visibility_m < FOG_DENSE_BELOW_M:
+        return Severity.HEAVY
+    if visibility_m < FOG_MODERATE_BELOW_M:
+        return Severity.MODERATE
+    if visibility_m <= FOG_LIGHT_UP_TO_M:
         return Severity.LIGHT
     return None
 
@@ -162,9 +165,7 @@ WEATHER_DESCRIPTIONS: dict[WeatherType, dict[Severity, str]] = {
 }
 
 
-def classify_weather(
-    weather_type: WeatherType, raw_value: float
-) -> Optional[WeatherCondition]:
+def classify_weather(weather_type: WeatherType, raw_value: float) -> WeatherCondition | None:
     """Classify a raw weather measurement into a WeatherCondition."""
     classifier = SEVERITY_CLASSIFIERS[weather_type]
     severity = classifier(raw_value)
@@ -197,7 +198,7 @@ def get_altitude_factor(altitude_m: float) -> float:
 
 
 def get_time_factor(dt: datetime) -> float:
-    """Calculate time-based multiplier from FRD 6.3."""
+    """Return the time-of-travel multiplier (local time of *dt*)."""
     hour = dt.hour
     weekday = dt.weekday()  # 0=Monday, 6=Sunday
     is_weekend = weekday >= 5
@@ -228,7 +229,7 @@ def calculate_segment_delay(
     altitude_m: float,
     arrival_time: datetime,
     calibration_factor: float = 1.0,
-    special_element_weather_multiplier: float = 1.0,
+    special_element_weather_multipliers: Mapping[WeatherType, float] | None = None,
     special_element_time_multiplier: float = 1.0,
 ) -> float:
     """
@@ -238,9 +239,9 @@ def calculate_segment_delay(
     Formula per condition:
         delay = base_impact x F_road x F_altitude x F_time x C_calibration x (km/100)
 
-    Special element multipliers (FRD 6.4):
-        - special_element_weather_multiplier: applied to each weather condition delay
-          (0.0 for tunnels = annuls all weather delay)
+    Special element multipliers (see app.engine.special_elements):
+        - special_element_weather_multipliers: per weather type, applied to that
+          condition's delay (reduced by tunnels, amplified by bridges and passes)
         - special_element_time_multiplier: applied to the time factor
           (1.3 for urban centers)
     """
@@ -251,12 +252,13 @@ def calculate_segment_delay(
     f_altitude = get_altitude_factor(altitude_m)
     f_time = get_time_factor(arrival_time) * special_element_time_multiplier
 
+    weather_multipliers = special_element_weather_multipliers or {}
+
     total_delay = 0.0
     for condition in weather_conditions:
         base = get_base_impact(condition)
         delay = base * f_road * f_altitude * f_time * calibration_factor
-        delay *= special_element_weather_multiplier
-        effective_delay = delay * (segment_km / 100.0)
-        total_delay += effective_delay
+        delay *= weather_multipliers.get(condition.type, 1.0)
+        total_delay += delay * (segment_km / 100.0)
 
     return round(total_delay, 2)

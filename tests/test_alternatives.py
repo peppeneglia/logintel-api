@@ -1,8 +1,8 @@
-"""Tests for alternative routes (Block 6)."""
+"""Tests for alternative routes."""
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from unittest.mock import AsyncMock, patch
 
 import httpx
@@ -19,8 +19,6 @@ from app.models.schemas import (
     Coordinate,
     PredictionResponse,
     RoadType,
-    SegmentDetail,
-    SegmentFactors,
 )
 from app.services.ors import (
     RouteResult,
@@ -30,12 +28,11 @@ from app.services.ors import (
 )
 from app.services.prediction import (
     _build_alternative_summary,
-    _build_alternatives,
     build_prediction,
 )
 
-
 # ─── Fixtures ───────────────────────────────────────────────────────────
+
 
 @pytest.fixture(autouse=True)
 def _manage_http_client():
@@ -97,14 +94,17 @@ ELEVATION_RESPONSE = {
 }
 
 
-def _meteo_batch_callback(request: httpx.Request, weather_data: dict = OPEN_METEO_HEAVY_RAIN) -> httpx.Response:
+def _meteo_batch_callback(
+    request: httpx.Request, weather_data: dict = OPEN_METEO_HEAVY_RAIN
+) -> httpx.Response:
     """Return single-location or multi-location response based on query params."""
     url = str(request.url)
     # Count how many coordinates were requested
-    from urllib.parse import urlparse, parse_qs
+    from urllib.parse import parse_qs, urlparse
+
     qs = parse_qs(urlparse(url).query)
     lats = qs.get("latitude", [""])[0].split(",")
-    n = len([l for l in lats if l.strip()])
+    n = len([lat for lat in lats if lat.strip()])
     if n <= 1:
         return httpx.Response(200, json=weather_data)
     # Multi-location: return array of identical responses
@@ -112,6 +112,7 @@ def _meteo_batch_callback(request: httpx.Request, weather_data: dict = OPEN_METE
 
 
 # ─── get_routes tests ──────────────────────────────────────────────────
+
 
 class TestGetRoutes:
     @pytest.mark.asyncio
@@ -135,9 +136,7 @@ class TestGetRoutes:
         """With alternatives flag, ORS returns multiple routes."""
         with respx.mock:
             respx.post("https://api.openrouteservice.org/v2/directions/driving-hgv").mock(
-                return_value=httpx.Response(
-                    200, json={"routes": [ORS_MAIN_ROUTE, ORS_ALT_ROUTE]}
-                )
+                return_value=httpx.Response(200, json={"routes": [ORS_MAIN_ROUTE, ORS_ALT_ROUTE]})
             )
             result = await get_routes(
                 Coordinate(lat=45.464, lon=9.190),
@@ -176,14 +175,10 @@ class TestGetRoutes:
                 road_types=[(0.0, 1.0, RoadType.STATE_ROAD)],
             ),
         ]
-        await _cache_mod.cache_set(
-            f"route:{route_hash}:alt", _routes_to_dicts(routes), ttl=86400
-        )
+        await _cache_mod.cache_set(f"route:{route_hash}:alt", _routes_to_dicts(routes), ttl=86400)
 
         with respx.mock:
-            ors_route = respx.post(
-                "https://api.openrouteservice.org/v2/directions/driving-hgv"
-            )
+            ors_route = respx.post("https://api.openrouteservice.org/v2/directions/driving-hgv")
             ors_route.mock(return_value=httpx.Response(500, text="should not be called"))
 
             result = await get_routes(origin, dest, include_alternatives=True)
@@ -212,6 +207,7 @@ class TestGetRoutes:
 
 # ─── build_prediction alternatives tests ───────────────────────────────
 
+
 class TestBuildPredictionAlternatives:
     @pytest.mark.asyncio
     async def test_build_prediction_no_alternatives_default(self):
@@ -227,7 +223,7 @@ class TestBuildPredictionAlternatives:
                 return_value=httpx.Response(200, json=ELEVATION_RESPONSE)
             )
 
-            departure = datetime(2026, 2, 15, 8, 0, tzinfo=timezone.utc)
+            departure = datetime(2026, 2, 15, 8, 0, tzinfo=UTC)
             result = await build_prediction(
                 Coordinate(lat=45.464, lon=9.190),
                 Coordinate(lat=41.902, lon=12.496),
@@ -240,9 +236,7 @@ class TestBuildPredictionAlternatives:
         """Delay below threshold → alternatives empty even with flag."""
         with respx.mock:
             respx.post("https://api.openrouteservice.org/v2/directions/driving-hgv").mock(
-                return_value=httpx.Response(
-                    200, json={"routes": [ORS_MAIN_ROUTE, ORS_ALT_ROUTE]}
-                )
+                return_value=httpx.Response(200, json={"routes": [ORS_MAIN_ROUTE, ORS_ALT_ROUTE]})
             )
             # Clear weather → low/zero delay
             respx.get("https://api.open-meteo.com/v1/forecast").mock(
@@ -252,7 +246,7 @@ class TestBuildPredictionAlternatives:
                 return_value=httpx.Response(200, json=ELEVATION_RESPONSE)
             )
 
-            departure = datetime(2026, 2, 15, 8, 0, tzinfo=timezone.utc)
+            departure = datetime(2026, 2, 15, 8, 0, tzinfo=UTC)
             result = await build_prediction(
                 Coordinate(lat=45.464, lon=9.190),
                 Coordinate(lat=41.902, lon=12.496),
@@ -268,9 +262,7 @@ class TestBuildPredictionAlternatives:
         """Delay above threshold → alternatives populated."""
         with respx.mock:
             respx.post("https://api.openrouteservice.org/v2/directions/driving-hgv").mock(
-                return_value=httpx.Response(
-                    200, json={"routes": [ORS_MAIN_ROUTE, ORS_ALT_ROUTE]}
-                )
+                return_value=httpx.Response(200, json={"routes": [ORS_MAIN_ROUTE, ORS_ALT_ROUTE]})
             )
             # Heavy rain → delay > 20 min (batch-aware callback)
             respx.get("https://api.open-meteo.com/v1/forecast").mock(
@@ -280,7 +272,7 @@ class TestBuildPredictionAlternatives:
                 return_value=httpx.Response(200, json=ELEVATION_RESPONSE)
             )
 
-            departure = datetime(2026, 2, 15, 8, 0, tzinfo=timezone.utc)
+            departure = datetime(2026, 2, 15, 8, 0, tzinfo=UTC)
             result = await build_prediction(
                 Coordinate(lat=45.464, lon=9.190),
                 Coordinate(lat=41.902, lon=12.496),
@@ -296,6 +288,7 @@ class TestBuildPredictionAlternatives:
 
 
 # ─── Helper tests ──────────────────────────────────────────────────────
+
 
 class TestAlternativeHelpers:
     def test_delay_savings_calculation(self):
@@ -340,13 +333,14 @@ class TestAlternativeHelpers:
 
 # ─── Backward compatibility ────────────────────────────────────────────
 
+
 class TestBackwardCompatibility:
     def test_prediction_response_backward_compatible(self):
         """PredictionResponse without alternatives → default empty list."""
         resp = PredictionResponse(
             origin=Coordinate(lat=45.0, lon=9.0),
             destination=Coordinate(lat=42.0, lon=12.0),
-            departure_time=datetime(2026, 2, 15, 8, 0, tzinfo=timezone.utc),
+            departure_time=datetime(2026, 2, 15, 8, 0, tzinfo=UTC),
             total_delay_minutes=10.0,
             confidence=ConfidenceScore(
                 overall=85.0,
@@ -369,10 +363,12 @@ class TestBackwardCompatibility:
 
 # ─── API integration test ──────────────────────────────────────────────
 
+
 class TestCreatePredictionApiWithAlternatives:
     def test_create_prediction_api_with_alternatives(self):
         """POST /v1/predictions with include_alternatives returns alternatives in JSON."""
         from fastapi.testclient import TestClient
+
         from app.main import app
 
         test_client = TestClient(app)
@@ -380,7 +376,7 @@ class TestCreatePredictionApiWithAlternatives:
         stub = PredictionResponse(
             origin=Coordinate(lat=45.464, lon=9.190),
             destination=Coordinate(lat=41.902, lon=12.496),
-            departure_time=datetime(2026, 2, 15, 8, 0, tzinfo=timezone.utc),
+            departure_time=datetime(2026, 2, 15, 8, 0, tzinfo=UTC),
             total_delay_minutes=45.0,
             confidence=ConfidenceScore(
                 overall=80.0,

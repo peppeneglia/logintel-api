@@ -12,7 +12,6 @@ from datetime import datetime, timedelta
 
 from app.models.schemas import Coordinate
 
-
 # Average freight speed in km/h for ETA estimation
 DEFAULT_FREIGHT_SPEED_KMH = 70.0
 
@@ -41,9 +40,7 @@ def interpolate_point(p1: Coordinate, p2: Coordinate, fraction: float) -> Coordi
     return Coordinate(lat=round(lat, 6), lon=round(lon, 6))
 
 
-def sample_points_from_polyline(
-    polyline: list[Coordinate], interval_km: float = 50.0
-) -> list[Coordinate]:
+def sample_points_from_polyline(polyline: list[Coordinate], interval_km: float = 50.0) -> list[Coordinate]:
     """
     Sample points at regular km intervals along a polyline.
 

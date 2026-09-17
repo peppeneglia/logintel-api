@@ -1,5 +1,5 @@
 """
-Open-Elevation integration — FRD Section 4.4.
+Open-Elevation integration.
 
 Fetches elevation data for sampled route points via batch POST.
 Falls back to 200m default on failure (graceful degradation).
@@ -35,7 +35,8 @@ async def get_elevations(
     except Exception:
         logger.warning(
             "Elevation API failed for %d points — using default %.0fm",
-            len(points), DEFAULT_ELEVATION_M,
+            len(points),
+            DEFAULT_ELEVATION_M,
             exc_info=True,
         )
         return [DEFAULT_ELEVATION_M] * len(points)
@@ -47,25 +48,24 @@ async def _fetch_elevations_batch(
 ) -> list[float]:
     """Execute the batch elevation lookup."""
     url = f"{base_url}/api/v1/lookup"
-    body = {
-        "locations": [
-            {"latitude": p.lat, "longitude": p.lon} for p in points
-        ]
-    }
+    body = {"locations": [{"latitude": p.lat, "longitude": p.lon} for p in points]}
 
     response = await request_with_retry(
-        "POST", url, json=body, retries=2, backoff=0.3,
+        "POST",
+        url,
+        json=body,
+        retries=2,
+        backoff=0.3,
         service_name="open_elevation",
     )
     response.raise_for_status()
     data = response.json()
 
     results = data.get("results", [])
-    elevations: list[float] = []
-    for i, point in enumerate(points):
-        if i < len(results) and results[i].get("elevation") is not None:
-            elevations.append(float(results[i]["elevation"]))
-        else:
-            elevations.append(DEFAULT_ELEVATION_M)
-
+    elevations = [
+        float(r["elevation"]) if r.get("elevation") is not None else DEFAULT_ELEVATION_M
+        for r in results[: len(points)]
+    ]
+    # Pad with the default if the API returned fewer results than requested
+    elevations.extend([DEFAULT_ELEVATION_M] * (len(points) - len(elevations)))
     return elevations

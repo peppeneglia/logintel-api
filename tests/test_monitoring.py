@@ -1,5 +1,5 @@
 """
-Tests for Block 7B: Monitoring and Observability.
+Tests for monitoring and observability.
 
 Covers MetricsCollector, RequestIdMiddleware, TimingMiddleware,
 enriched health endpoint, and structured logging.
@@ -18,8 +18,6 @@ from fastapi.testclient import TestClient
 
 from app.logging_config import LogintelJsonFormatter, org_id_var, request_id_var
 from app.metrics import MetricsCollector
-from app.middleware import RequestIdMiddleware, TimingMiddleware
-
 
 # ── MetricsCollector ──────────────────────────────────────────────
 
@@ -101,6 +99,7 @@ class TestMetricsCollector:
 @pytest.fixture
 def client():
     from app.main import app
+
     return TestClient(app)
 
 
@@ -121,6 +120,7 @@ class TestTimingMiddleware:
     def test_records_duration(self, client):
         """TimingMiddleware should feed metrics_collector on each request."""
         from app.metrics import metrics_collector
+
         before = metrics_collector.snapshot().total_requests
         client.get("/v1/health")
         after = metrics_collector.snapshot().total_requests
@@ -168,9 +168,7 @@ class TestStructuredLogging:
         """LogintelJsonFormatter should produce valid JSON."""
         stream = StringIO()
         handler = logging.StreamHandler(stream)
-        formatter = LogintelJsonFormatter(
-            fmt="%(timestamp)s %(level)s %(logger)s %(message)s"
-        )
+        formatter = LogintelJsonFormatter(fmt="%(timestamp)s %(level)s %(logger)s %(message)s")
         handler.setFormatter(formatter)
 
         test_logger = logging.getLogger("test.json_output")
@@ -188,9 +186,7 @@ class TestStructuredLogging:
         """Log output should include request_id from ContextVar."""
         stream = StringIO()
         handler = logging.StreamHandler(stream)
-        formatter = LogintelJsonFormatter(
-            fmt="%(timestamp)s %(level)s %(logger)s %(message)s"
-        )
+        formatter = LogintelJsonFormatter(fmt="%(timestamp)s %(level)s %(logger)s %(message)s")
         handler.setFormatter(formatter)
 
         test_logger = logging.getLogger("test.request_id")
@@ -210,9 +206,7 @@ class TestStructuredLogging:
         """Log output should include organization_id from ContextVar."""
         stream = StringIO()
         handler = logging.StreamHandler(stream)
-        formatter = LogintelJsonFormatter(
-            fmt="%(timestamp)s %(level)s %(logger)s %(message)s"
-        )
+        formatter = LogintelJsonFormatter(fmt="%(timestamp)s %(level)s %(logger)s %(message)s")
         handler.setFormatter(formatter)
 
         test_logger = logging.getLogger("test.org_id")

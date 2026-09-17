@@ -1,19 +1,19 @@
-"""Tests for the calibration engine — FRD Section 7.4."""
+"""Tests for the calibration engine."""
 
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 import pytest
 
 from app.engine.calibration import (
-    ACCURACY_THRESHOLD_MINUTES,
+    COEFF_LOWER,
+    COEFF_UPPER,
     DEFAULT_HISTORICAL_ACCURACY,
     LEARNING_RATE,
     MIN_CONDITION_GROUPS,
     MIN_FEEDBACK_COUNT,
     MIN_SPAN_DAYS,
-    CalibrationInput,
     check_prerequisites,
     compute_error_factors,
     compute_historical_accuracy,
@@ -33,7 +33,7 @@ from app.models.schemas import (
     WeatherCondition,
     WeatherType,
 )
-from app.stores.calibration_store import COEFF_LOWER, COEFF_UPPER
+from app.stores.base import FeedbackPair
 
 
 def _make_prediction(
@@ -43,7 +43,7 @@ def _make_prediction(
     departure_offset_days: int = 0,
 ) -> PredictionResponse:
     """Helper to create a PredictionResponse with a single weather condition."""
-    base_time = datetime(2026, 2, 1, 8, 0, tzinfo=timezone.utc) + timedelta(days=departure_offset_days)
+    base_time = datetime(2026, 2, 1, 8, 0, tzinfo=UTC) + timedelta(days=departure_offset_days)
     origin = Coordinate(lat=45.0, lon=9.0)
     dest = Coordinate(lat=42.0, lon=12.0)
 
@@ -99,7 +99,7 @@ def _make_feedback(
     offset_days: int = 0,
 ) -> FeedbackResponse:
     """Helper to create a FeedbackResponse."""
-    base_time = datetime(2026, 2, 1, 10, 0, tzinfo=timezone.utc) + timedelta(days=offset_days)
+    base_time = datetime(2026, 2, 1, 10, 0, tzinfo=UTC) + timedelta(days=offset_days)
     return FeedbackResponse(
         prediction_id=prediction_id,
         actual_delay_minutes=actual_delay,
@@ -115,9 +115,9 @@ def _make_inputs(
     actual_delay: int = 10,
     span_days: int = 20,
     weather_types: list[tuple[WeatherType, Severity]] | None = None,
-) -> list[CalibrationInput]:
+) -> list[FeedbackPair]:
     """
-    Build a list of CalibrationInput entries.
+    Build a list of FeedbackPair entries.
 
     Distributes feedback over span_days and cycles through weather_types.
     """
@@ -132,16 +132,15 @@ def _make_inputs(
     for i in range(count):
         wt, sev = weather_types[i % len(weather_types)]
         day_offset = int(i * span_days / max(count - 1, 1)) if count > 1 else 0
-        pred = _make_prediction(
-            delay=delay, weather_type=wt, severity=sev, departure_offset_days=day_offset
-        )
+        pred = _make_prediction(delay=delay, weather_type=wt, severity=sev, departure_offset_days=day_offset)
         fb = _make_feedback(pred.id, actual_delay=actual_delay, offset_days=day_offset)
-        inputs.append(CalibrationInput(prediction=pred, feedback=fb))
+        inputs.append(FeedbackPair(prediction=pred, feedback=fb))
 
     return inputs
 
 
 # --- Prerequisites ---
+
 
 class TestCheckPrerequisites:
     def test_insufficient_feedback(self):
@@ -175,6 +174,7 @@ class TestCheckPrerequisites:
 
 # --- Error factors ---
 
+
 class TestComputeErrorFactors:
     def test_perfect_prediction(self):
         """When actual == predicted, error_factor should be 1.0."""
@@ -199,6 +199,7 @@ class TestComputeErrorFactors:
 
 
 # --- Coefficients ---
+
 
 class TestComputeNewCoefficients:
     def test_no_change_when_ef_is_one(self):
@@ -230,21 +231,22 @@ class TestComputeNewCoefficients:
 
 # --- Historical accuracy ---
 
+
 class TestComputeHistoricalAccuracy:
     def test_all_within_threshold(self):
         inputs = _make_inputs(count=10, delay=10.0, actual_delay=10)
-        accuracy = compute_historical_accuracy(inputs)
+        accuracy = compute_historical_accuracy([i.feedback for i in inputs])
         assert accuracy == 100.0
 
     def test_none_within_threshold(self):
         # Actual delay = 100, predicted = 10 → deviation = 90 > 15
         inputs = _make_inputs(count=10, delay=10.0, actual_delay=100)
-        accuracy = compute_historical_accuracy(inputs)
+        accuracy = compute_historical_accuracy([i.feedback for i in inputs])
         assert accuracy == 0.0
 
     def test_insufficient_data_returns_default(self):
         inputs = _make_inputs(count=3, delay=10.0, actual_delay=10)
-        accuracy = compute_historical_accuracy(inputs)
+        accuracy = compute_historical_accuracy([i.feedback for i in inputs])
         assert accuracy == DEFAULT_HISTORICAL_ACCURACY
 
     def test_mixed_accuracy(self):
@@ -255,6 +257,6 @@ class TestComputeHistoricalAccuracy:
             # 5 within threshold (actual=10), 5 outside (actual=50)
             actual = 10 if i < 5 else 50
             fb = _make_feedback(pred.id, actual_delay=actual, offset_days=i)
-            inputs.append(CalibrationInput(prediction=pred, feedback=fb))
-        accuracy = compute_historical_accuracy(inputs)
+            inputs.append(FeedbackPair(prediction=pred, feedback=fb))
+        accuracy = compute_historical_accuracy([i.feedback for i in inputs])
         assert accuracy == pytest.approx(50.0, abs=0.1)

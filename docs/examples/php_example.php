@@ -2,21 +2,21 @@
 /**
  * Logintel API — PHP integration example (cURL).
  *
- * Requirements: PHP 7.4+ with cURL extension.
+ * Requirements: PHP 8.0+ with the cURL extension.
  */
 
-$BASE_URL = "https://api.logintel.io";
-$API_KEY  = "YOUR_API_KEY";
+declare(strict_types=1);
 
-function apiRequest(string $method, string $url, ?array $body = null): array
+const BASE_URL = "http://localhost:8000"; // replace with your deployment URL
+const API_KEY  = "YOUR_API_KEY";
+
+function apiRequest(string $method, string $path, ?array $body = null): array
 {
-    global $BASE_URL, $API_KEY;
-
-    $ch = curl_init($BASE_URL . $url);
+    $ch = curl_init(BASE_URL . $path);
     curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
     curl_setopt($ch, CURLOPT_HTTPHEADER, [
         "Content-Type: application/json",
-        "X-API-Key: " . $API_KEY,
+        "X-API-Key: " . API_KEY,
     ]);
 
     if ($method === "POST") {
@@ -27,6 +27,11 @@ function apiRequest(string $method, string $url, ?array $body = null): array
     }
 
     $response = curl_exec($ch);
+    if ($response === false) {
+        $error = curl_error($ch);
+        curl_close($ch);
+        throw new RuntimeException("Request failed: {$error}");
+    }
     $httpCode = curl_getinfo($ch, CURLINFO_HTTP_CODE);
     curl_close($ch);
 
@@ -40,12 +45,13 @@ function apiRequest(string $method, string $url, ?array $body = null): array
     return $data;
 }
 
-// 1. Create a prediction (Milan -> Rome)
+// 1. Create a prediction (Milan -> Rome), departing tomorrow
 echo "=== Create Prediction ===\n";
+$departure = (new DateTimeImmutable("+1 day", new DateTimeZone("UTC")))->format(DATE_ATOM);
 $prediction = apiRequest("POST", "/v1/predictions", [
-    "origin"      => ["lat" => 45.4642, "lon" => 9.1900],
-    "destination"  => ["lat" => 41.9028, "lon" => 12.4964],
-    "departure_time" => "2026-02-15T08:00:00+01:00",
+    "origin"               => ["lat" => 45.4642, "lon" => 9.1900],
+    "destination"          => ["lat" => 41.9028, "lon" => 12.4964],
+    "departure_time"       => $departure,
     "include_alternatives" => true,
 ]);
 
@@ -54,10 +60,8 @@ echo "  ID: {$predictionId}\n";
 echo "  Total delay: {$prediction['total_delay_minutes']} min\n";
 echo "  Confidence: {$prediction['confidence']['overall']}% ({$prediction['confidence']['level']})\n";
 
-if (!empty($prediction["alternatives"])) {
-    foreach ($prediction["alternatives"] as $alt) {
-        echo "  Alternative {$alt['route_index']}: saves {$alt['delay_savings_minutes']} min\n";
-    }
+foreach ($prediction["alternatives"] as $alt) {
+    echo "  Alternative {$alt['route_index']}: saves {$alt['delay_savings_minutes']} min\n";
 }
 
 // 2. Retrieve the prediction
@@ -65,11 +69,11 @@ echo "\n=== Get Prediction ===\n";
 $retrieved = apiRequest("GET", "/v1/predictions/{$predictionId}");
 echo "  Retrieved: {$retrieved['total_delay_minutes']} min delay\n";
 
-// 3. Submit feedback
+// 3. Submit feedback (after the trip)
 echo "\n=== Submit Feedback ===\n";
 $feedback = apiRequest("POST", "/v1/predictions/{$predictionId}/feedback", [
     "actual_delay_minutes" => 35,
-    "notes" => "Heavy rain near Florence",
+    "notes"                => "Heavy rain near Florence",
 ]);
 echo "  Predicted: {$feedback['predicted_delay_minutes']} min\n";
 echo "  Actual: {$feedback['actual_delay_minutes']} min\n";

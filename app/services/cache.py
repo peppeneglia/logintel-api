@@ -1,5 +1,5 @@
 """
-Redis cache layer (Upstash) — FRD Section 4.5.
+Redis cache layer (Upstash).
 
 Provides async get/set with JSON serialization and graceful degradation.
 If Redis is unavailable or unconfigured, all operations silently return None.
@@ -14,6 +14,8 @@ import logging
 from typing import Any
 
 import redis.asyncio as aioredis
+
+from app.metrics import metrics_collector
 
 logger = logging.getLogger(__name__)
 
@@ -45,18 +47,22 @@ async def cache_get(key: str) -> dict | list | None:
         return None
     try:
         raw = await _redis.get(key)
-        if raw is None:
-            from app.metrics import metrics_collector
-            metrics_collector.record_cache_miss()
-            return None
-        from app.metrics import metrics_collector
-        metrics_collector.record_cache_hit()
-        return json.loads(raw)
     except Exception:
         logger.warning("Redis GET failed for key=%s", key, exc_info=True)
-        from app.metrics import metrics_collector
         metrics_collector.record_cache_miss()
         return None
+
+    if raw is None:
+        metrics_collector.record_cache_miss()
+        return None
+    try:
+        value = json.loads(raw)
+    except ValueError:
+        logger.warning("Corrupted cache entry for key=%s", key)
+        metrics_collector.record_cache_miss()
+        return None
+    metrics_collector.record_cache_hit()
+    return value
 
 
 async def cache_set(key: str, value: Any, ttl: int) -> None:
@@ -64,13 +70,13 @@ async def cache_set(key: str, value: Any, ttl: int) -> None:
     if _redis is None:
         return
     try:
-        await _redis.setex(key, ttl, json.dumps(value))
+        await _redis.set(key, json.dumps(value), ex=ttl)
     except Exception:
         logger.warning("Redis SET failed for key=%s", key, exc_info=True)
 
 
 def get_redis() -> aioredis.Redis | None:
-    """Return the current Redis client (for testing)."""
+    """Return the current Redis client, or None when caching is disabled."""
     return _redis
 
 

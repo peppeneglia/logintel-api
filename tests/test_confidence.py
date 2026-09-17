@@ -1,34 +1,34 @@
-"""Tests for the confidence scoring — validates against FRD Section 6.5."""
+"""Tests for the confidence scoring."""
 
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 from app.engine.confidence import (
     compute_confidence,
+    compute_data_completeness_score,
     compute_time_horizon_score,
     compute_weather_stability_score,
-    compute_data_completeness_score,
 )
 from app.models.schemas import ConfidenceLevel
 
 
 class TestTimeHorizon:
     def test_under_6h(self):
-        now = datetime(2026, 2, 14, 10, 0, tzinfo=timezone.utc)
+        now = datetime(2026, 2, 14, 10, 0, tzinfo=UTC)
         dep = now + timedelta(hours=3)
         assert compute_time_horizon_score(dep, now) == 95.0
 
     def test_6_to_24h(self):
-        now = datetime(2026, 2, 14, 10, 0, tzinfo=timezone.utc)
+        now = datetime(2026, 2, 14, 10, 0, tzinfo=UTC)
         dep = now + timedelta(hours=12)
         assert compute_time_horizon_score(dep, now) == 80.0
 
     def test_24_to_48h(self):
-        now = datetime(2026, 2, 14, 10, 0, tzinfo=timezone.utc)
+        now = datetime(2026, 2, 14, 10, 0, tzinfo=UTC)
         dep = now + timedelta(hours=36)
         assert compute_time_horizon_score(dep, now) == 65.0
 
     def test_over_48h(self):
-        now = datetime(2026, 2, 14, 10, 0, tzinfo=timezone.utc)
+        now = datetime(2026, 2, 14, 10, 0, tzinfo=UTC)
         dep = now + timedelta(hours=60)
         assert compute_time_horizon_score(dep, now) == 50.0
 
@@ -69,7 +69,7 @@ class TestDataCompleteness:
 
 class TestComputeConfidence:
     def test_high_confidence_near_departure(self):
-        now = datetime(2026, 2, 14, 10, 0, tzinfo=timezone.utc)
+        now = datetime(2026, 2, 14, 10, 0, tzinfo=UTC)
         dep = now + timedelta(hours=2)
         result = compute_confidence(
             departure=dep,
@@ -82,7 +82,7 @@ class TestComputeConfidence:
         assert result.overall >= 85.0
 
     def test_low_confidence_far_departure_bad_data(self):
-        now = datetime(2026, 2, 14, 10, 0, tzinfo=timezone.utc)
+        now = datetime(2026, 2, 14, 10, 0, tzinfo=UTC)
         dep = now + timedelta(hours=60)
         result = compute_confidence(
             departure=dep,
@@ -94,7 +94,7 @@ class TestComputeConfidence:
         assert result.overall < 70.0
 
     def test_components_present(self):
-        now = datetime(2026, 2, 14, 10, 0, tzinfo=timezone.utc)
+        now = datetime(2026, 2, 14, 10, 0, tzinfo=UTC)
         dep = now + timedelta(hours=5)
         result = compute_confidence(
             departure=dep,

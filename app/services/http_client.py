@@ -1,5 +1,5 @@
 """
-Shared HTTP client with retry and exponential backoff — FRD 4.5.
+Shared HTTP client with retry, exponential backoff and circuit breaking.
 
 Provides a singleton httpx.AsyncClient reused by all service modules.
 """
@@ -11,6 +11,9 @@ import logging
 from typing import Any
 
 import httpx
+
+from app.circuit_breaker import service_breakers
+from app.errors import ServiceUnavailableError
 
 logger = logging.getLogger(__name__)
 
@@ -61,27 +64,25 @@ async def request_with_retry(
     """
     Execute an HTTP request with exponential-backoff retry.
 
-    Retries on 5xx responses and connection/timeout errors.
+    Retries on 5xx responses and transport errors (connection, timeout, protocol).
     Raises the last encountered exception after all retries are exhausted.
 
     When *service_name* is given the request is gated by the corresponding
     circuit breaker — if the breaker is OPEN the call fails fast with
     ``ServiceUnavailableError``.
     """
-    # --- Circuit breaker check ---
+    if retries < 1:
+        raise ValueError("retries must be >= 1")
+
     breaker = None
     if service_name is not None:
-        from app.circuit_breaker import service_breakers
-        from app.errors import ServiceUnavailableError
-
         breaker = service_breakers.get(service_name)
         if not breaker.allow_request():
             logger.warning(
-                "Circuit breaker OPEN for %s — fail-fast", service_name,
+                "Circuit breaker OPEN for %s — fail-fast",
+                service_name,
             )
-            raise ServiceUnavailableError(
-                f"Service '{service_name}' circuit breaker is OPEN"
-            )
+            raise ServiceUnavailableError(f"Service '{service_name}' circuit breaker is OPEN")
 
     client = get_client()
     last_exc: Exception | None = None
@@ -101,13 +102,21 @@ async def request_with_retry(
             )
             logger.warning(
                 "HTTP %s %s returned %s (attempt %d/%d)",
-                method, url, response.status_code, attempt, retries,
+                method,
+                url,
+                response.status_code,
+                attempt,
+                retries,
             )
-        except (httpx.ConnectError, httpx.TimeoutException, httpx.ReadError) as exc:
+        except httpx.TransportError as exc:
             last_exc = exc
             logger.warning(
                 "HTTP %s %s failed: %s (attempt %d/%d)",
-                method, url, exc, attempt, retries,
+                method,
+                url,
+                exc,
+                attempt,
+                retries,
             )
 
         if attempt < retries:
@@ -118,4 +127,4 @@ async def request_with_retry(
     if breaker is not None:
         breaker.record_failure()
     logger.error("HTTP %s %s failed after %d attempts", method, url, retries)
-    raise last_exc  # type: ignore[misc]
+    raise last_exc if last_exc is not None else RuntimeError(f"{method} {url} failed")

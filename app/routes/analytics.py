@@ -1,5 +1,5 @@
 """
-Analytics endpoints — FRD Section 8.2.
+Analytics endpoints.
 
 GET /v1/analytics/accuracy — Accuracy metrics and calibration info
 """
@@ -12,6 +12,7 @@ from fastapi import APIRouter, Depends
 
 import app.stores as stores
 from app.auth import OrgContext, get_current_org
+from app.engine.calibration import get_dominant_condition
 from app.models.schemas import (
     AnalyticsResponse,
     ErrorResponse,
@@ -20,6 +21,18 @@ from app.models.schemas import (
 )
 
 router = APIRouter(prefix="/v1/analytics", tags=["analytics"])
+
+
+def _accuracy_stats(deviations: list[float]) -> tuple[float, float, float]:
+    """Return (MAE, % within 10 min, % within 20 min) for absolute deviations."""
+    if not deviations:
+        return 0.0, 0.0, 0.0
+    n = len(deviations)
+    return (
+        round(sum(deviations) / n, 2),
+        round(sum(1 for d in deviations if d <= 10) / n * 100, 1),
+        round(sum(1 for d in deviations if d <= 20) / n * 100, 1),
+    )
 
 
 @router.get(
@@ -39,65 +52,45 @@ async def get_accuracy(
     - **MAE** — Mean Absolute Error between predicted and actual delays (minutes).
     - **within_10min_pct / within_20min_pct** — percentage of predictions within 10/20 min of actual.
     - **feedback_rate** — percentage of predictions that received feedback.
-    - **calibration_version** — current calibration coefficient version.
+    - **calibration_version** — current (global) calibration coefficient version.
     - **breakdown_by_weather** — per-weather-type accuracy (rain, snow, wind, fog).
 
     Metrics are computed from all feedback entries for the authenticated organization.
     """
     total_predictions = await stores.prediction_store.prediction_count(org_id=org.org_id)
     total_feedback = await stores.prediction_store.feedback_count(org_id=org.org_id)
+    pairs = await stores.prediction_store.list_feedback_pairs(org_id=org.org_id)
 
-    feedback_rate = 0.0
-    if total_predictions > 0:
-        feedback_rate = round((total_feedback / total_predictions) * 100.0, 1)
-
-    all_fb = await stores.prediction_store.all_feedback(org_id=org.org_id)
-
-    # Compute overall metrics
     deviations: list[float] = []
-    # Per weather-type buckets: weather_type -> list of (abs_deviation)
     weather_buckets: dict[WeatherType, list[float]] = defaultdict(list)
 
-    for fb in all_fb:
-        pred = await stores.prediction_store.get_prediction(fb.prediction_id, org_id=org.org_id)
-        if pred is None:
-            continue
-
-        abs_dev = abs(fb.actual_delay_minutes - pred.total_delay_minutes)
+    for pair in pairs:
+        abs_dev = abs(pair.feedback.actual_delay_minutes - pair.prediction.total_delay_minutes)
         deviations.append(abs_dev)
 
-        # Find dominant weather type for this prediction
-        dominant_type = _get_dominant_weather_type(pred)
-        if dominant_type is not None:
-            weather_buckets[dominant_type].append(abs_dev)
+        dominant = get_dominant_condition(pair.prediction)
+        if dominant is not None:
+            weather_buckets[dominant[0]].append(abs_dev)
 
-    mae = 0.0
-    within_10 = 0.0
-    within_20 = 0.0
+    mae, within_10, within_20 = _accuracy_stats(deviations)
 
-    if deviations:
-        mae = round(sum(deviations) / len(deviations), 2)
-        within_10 = round(sum(1 for d in deviations if d <= 10) / len(deviations) * 100, 1)
-        within_20 = round(sum(1 for d in deviations if d <= 20) / len(deviations) * 100, 1)
-
-    # Breakdown by weather type
     breakdown: list[WeatherTypeBreakdown] = []
-    for wt in WeatherType:
-        devs = weather_buckets.get(wt, [])
+    for weather_type in WeatherType:
+        devs = weather_buckets.get(weather_type)
         if not devs:
             continue
-        wt_mae = round(sum(devs) / len(devs), 2)
-        wt_10 = round(sum(1 for d in devs if d <= 10) / len(devs) * 100, 1)
-        wt_20 = round(sum(1 for d in devs if d <= 20) / len(devs) * 100, 1)
+        wt_mae, wt_10, wt_20 = _accuracy_stats(devs)
         breakdown.append(
             WeatherTypeBreakdown(
-                weather_type=wt,
+                weather_type=weather_type,
                 count=len(devs),
                 mae=wt_mae,
                 within_10min_pct=wt_10,
                 within_20min_pct=wt_20,
             )
         )
+
+    feedback_rate = round(total_feedback / total_predictions * 100.0, 1) if total_predictions else 0.0
 
     return AnalyticsResponse(
         total_predictions=total_predictions,
@@ -106,23 +99,6 @@ async def get_accuracy(
         mae=mae,
         within_10min_pct=within_10,
         within_20min_pct=within_20,
-        calibration_version=await stores.calibration_store.get_current_version(org_id=org.org_id),
+        calibration_version=await stores.calibration_store.get_current_version(),
         breakdown_by_weather=breakdown,
     )
-
-
-def _get_dominant_weather_type(pred) -> WeatherType | None:
-    """Find the weather type with highest impact across all segments."""
-    from app.engine.heuristics import WEATHER_IMPACT
-
-    best_type: WeatherType | None = None
-    best_impact = 0.0
-
-    for segment in pred.segments:
-        for condition in segment.weather:
-            impact = WEATHER_IMPACT.get(condition.type, {}).get(condition.severity, 0.0)
-            if impact > best_impact:
-                best_impact = impact
-                best_type = condition.type
-
-    return best_type

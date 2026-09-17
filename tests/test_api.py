@@ -2,10 +2,9 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from unittest.mock import AsyncMock, patch
 
-import pytest
 from fastapi.testclient import TestClient
 
 from app.main import app
@@ -34,7 +33,7 @@ def _make_stub_prediction(
     if destination is None:
         destination = Coordinate(lat=41.902, lon=12.496)
     if departure_time is None:
-        departure_time = datetime(2026, 2, 15, 8, 0, tzinfo=timezone.utc)
+        departure_time = datetime.now(UTC) + timedelta(days=1)
 
     segment = SegmentDetail(
         index=0,
@@ -86,8 +85,14 @@ class TestHealthEndpoint:
         assert "metrics" in data
 
 
+def _tomorrow_iso() -> str:
+    """Departure inside both the forecast horizon and the feedback window."""
+    return (datetime.now(UTC) + timedelta(days=1)).isoformat()
+
+
 class TestPredictionEndpoints:
-    def _create_prediction(self, departure_time: str = "2026-02-15T08:00:00+01:00"):
+    def _create_prediction(self, departure_time: str | None = None):
+        departure_time = departure_time or _tomorrow_iso()
         payload = {
             "origin": {"lat": 45.464, "lon": 9.190},
             "destination": {"lat": 41.902, "lon": 12.496},
@@ -160,11 +165,8 @@ class TestPredictionEndpoints:
 
     def test_feedback_rejected_after_7_days(self):
         """Feedback for predictions with departure > 7 days ago should be rejected."""
-        # Create a prediction with departure_time 10 days in the past
-        old_departure = datetime.now(timezone.utc) - timedelta(days=10)
-        old_departure_str = old_departure.isoformat()
-
-        create_resp = self._create_prediction(departure_time=old_departure_str)
+        old_departure = datetime.now(UTC) - timedelta(days=10)
+        create_resp = self._create_prediction(departure_time=old_departure.isoformat())
         pred_id = create_resp.json()["id"]
 
         resp = client.post(
@@ -177,6 +179,16 @@ class TestPredictionEndpoints:
 
 
 class TestValidationErrors:
+    def test_departure_beyond_forecast_horizon(self):
+        payload = {
+            "origin": {"lat": 45.464, "lon": 9.190},
+            "destination": {"lat": 41.902, "lon": 12.496},
+            "departure_time": (datetime.now(UTC) + timedelta(days=10)).isoformat(),
+        }
+        resp = client.post("/v1/predictions", json=payload)
+        assert resp.status_code == 400
+        assert "horizon" in resp.json()["error"]["message"]
+
     def test_missing_origin(self):
         payload = {
             "destination": {"lat": 41.902, "lon": 12.496},

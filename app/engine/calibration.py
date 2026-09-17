@@ -1,8 +1,8 @@
 """
-Calibration logic — FRD Section 7.4.
+Calibration logic.
 
-Pure functions that compute calibration coefficients from feedback data.
-No imports from stores or routes — receives data as arguments.
+Pure functions that compute calibration coefficients from feedback data;
+they receive data as arguments and never touch the stores directly.
 
 Formula: new = old + 0.15 * (error_factor - 1.0) * old
 Clamped to [0.5, 2.0].
@@ -10,16 +10,22 @@ Clamped to [0.5, 2.0].
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from collections.abc import Iterable
 from datetime import timedelta
 
+from app.engine.heuristics import WEATHER_IMPACT
 from app.models.schemas import (
     FeedbackResponse,
     PredictionResponse,
     Severity,
+    WeatherCondition,
     WeatherType,
 )
-from app.stores.calibration_store import COEFF_LOWER, COEFF_UPPER
+from app.stores.base import FeedbackPair
+
+# Bounds that keep calibration coefficients from drifting
+COEFF_LOWER = 0.5
+COEFF_UPPER = 2.0
 
 # Minimum feedback entries before calibration is attempted
 MIN_FEEDBACK_COUNT = 20
@@ -37,13 +43,7 @@ DEFAULT_HISTORICAL_ACCURACY = 70.0
 ACCURACY_THRESHOLD_MINUTES = 15.0
 
 
-@dataclass
-class CalibrationInput:
-    prediction: PredictionResponse
-    feedback: FeedbackResponse
-
-
-def check_prerequisites(inputs: list[CalibrationInput]) -> tuple[bool, str]:
+def check_prerequisites(inputs: list[FeedbackPair]) -> tuple[bool, str]:
     """
     Check whether calibration prerequisites are met.
 
@@ -71,7 +71,7 @@ def check_prerequisites(inputs: list[CalibrationInput]) -> tuple[bool, str]:
 
 
 def compute_error_factors(
-    inputs: list[CalibrationInput],
+    inputs: list[FeedbackPair],
 ) -> dict[tuple[WeatherType, Severity], float]:
     """
     Group feedback by dominant weather condition and compute mean(actual/predicted)
@@ -84,7 +84,7 @@ def compute_error_factors(
     grouped: dict[tuple[WeatherType, Severity], list[tuple[float, float]]] = {}
 
     for inp in inputs:
-        dominant = _get_dominant_condition(inp.prediction)
+        dominant = get_dominant_condition(inp.prediction)
         if dominant is None:
             continue
 
@@ -94,8 +94,7 @@ def compute_error_factors(
         if predicted <= 0:
             continue
 
-        key = (dominant[0], dominant[1])
-        grouped.setdefault(key, []).append((actual, predicted))
+        grouped.setdefault(dominant, []).append((actual, predicted))
 
     error_factors: dict[tuple[WeatherType, Severity], float] = {}
     for key, pairs in grouped.items():
@@ -110,7 +109,7 @@ def compute_new_coefficients(
     error_factors: dict[tuple[WeatherType, Severity], float],
 ) -> dict[tuple[WeatherType, Severity], float]:
     """
-    Apply FRD 7.4 formula to compute updated coefficients.
+    Apply the calibration formula to compute updated coefficients.
 
     new = old + 0.15 * (error_factor - 1.0) * old
     Clamped to [COEFF_LOWER, COEFF_UPPER].
@@ -131,55 +130,54 @@ def compute_new_coefficients(
     return new_coefficients
 
 
-def compute_historical_accuracy(inputs: list[CalibrationInput]) -> float:
+def compute_historical_accuracy(feedback: list[FeedbackResponse]) -> float:
     """
     Compute the percentage of predictions within ACCURACY_THRESHOLD_MINUTES of actual.
 
     Returns DEFAULT_HISTORICAL_ACCURACY if fewer than MIN_FEEDBACK_FOR_ACCURACY entries.
     """
-    if len(inputs) < MIN_FEEDBACK_FOR_ACCURACY:
+    if len(feedback) < MIN_FEEDBACK_FOR_ACCURACY:
         return DEFAULT_HISTORICAL_ACCURACY
 
     within_threshold = sum(
         1
-        for inp in inputs
-        if abs(inp.feedback.actual_delay_minutes - inp.prediction.total_delay_minutes)
-        <= ACCURACY_THRESHOLD_MINUTES
+        for fb in feedback
+        if abs(fb.actual_delay_minutes - fb.predicted_delay_minutes) <= ACCURACY_THRESHOLD_MINUTES
     )
 
-    return round((within_threshold / len(inputs)) * 100.0, 1)
+    return round((within_threshold / len(feedback)) * 100.0, 1)
 
 
-def _get_dominant_condition(
-    prediction: PredictionResponse,
+def dominant_condition(
+    conditions: Iterable[WeatherCondition],
 ) -> tuple[WeatherType, Severity] | None:
-    """
-    Find the dominant weather condition across all segments.
-
-    The dominant condition is the one with the highest base_impact.
-    """
-    from app.engine.heuristics import WEATHER_IMPACT
-
+    """Return the (type, severity) with the highest base impact, or None if there is none."""
     best: tuple[WeatherType, Severity] | None = None
     best_impact = 0.0
 
-    for segment in prediction.segments:
-        for condition in segment.weather:
-            impact = WEATHER_IMPACT.get(condition.type, {}).get(condition.severity, 0.0)
-            if impact > best_impact:
-                best_impact = impact
-                best = (condition.type, condition.severity)
+    for condition in conditions:
+        impact = WEATHER_IMPACT[condition.type][condition.severity]
+        if impact > best_impact:
+            best_impact = impact
+            best = (condition.type, condition.severity)
 
     return best
 
 
+def get_dominant_condition(
+    prediction: PredictionResponse,
+) -> tuple[WeatherType, Severity] | None:
+    """Find the dominant weather condition across all segments of a prediction."""
+    return dominant_condition(condition for segment in prediction.segments for condition in segment.weather)
+
+
 def _extract_condition_groups(
-    inputs: list[CalibrationInput],
+    inputs: list[FeedbackPair],
 ) -> set[tuple[WeatherType, Severity]]:
     """Extract distinct (WeatherType, Severity) groups from predictions."""
     groups: set[tuple[WeatherType, Severity]] = set()
     for inp in inputs:
-        dominant = _get_dominant_condition(inp.prediction)
+        dominant = get_dominant_condition(inp.prediction)
         if dominant is not None:
             groups.add(dominant)
     return groups
